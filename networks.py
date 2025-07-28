@@ -55,23 +55,41 @@ class PerceptionEncoder(nn.Module):
 class ContextMemory(nn.Module):
     def __init__(self, embd_dim, hidden_dim):
         super().__init__()
-        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=hidden_dim, num_layers=1, batch_first=True)
-    
-    def forward(self, current_context, add_state):
+        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=hidden_dim, num_layers=1, batch_first=False)
+
+    def forward(self, current_context, prev_state):
         """
-        current_context: [B, 1, embd_D] -- current memory
-        add_state: [h, c]               -- state to update memory with
+        current_context: [1, B, embd_D] -- 1 timestep input
+        prev_state: tuple (h, c)
          - h: [1, B, hidden_dim]
          - c: [1, B, hidden_dim]
-        --------------------------------------------------------
-        output: [1, B, hidden_dim]
-        next_state: [h, c]
-         - h: [1, B, hidden_dim]
-         - c: [1, B, hidden_dim]
+        Returns:
+        - output: [1, B, hidden_dim]
+        - next_state: (h, c)
         """
-        x = current_context.unsqueeze(0)
-        output, next_state = self.rnn(x, add_state)
+        output, next_state = self.rnn(current_context, prev_state)
+        return output.squeeze(0), next_state  
 
-        return output.squeeze(0), next_state
 
-        
+def memorytest():
+    embd_dim = 256
+    batch_size = 1
+
+    memory_module = ContextMemory(embd_dim=embd_dim, hidden_dim=embd_dim)
+
+    # Simulate one timestep of input: [seq_len=1, B, D]
+    current_context = torch.randn((1, batch_size, embd_dim))
+
+    # Initialize LSTM state (h, c): both [1, B, H]
+    h0 = torch.zeros(1, batch_size, embd_dim)
+    c0 = torch.zeros(1, batch_size, embd_dim)
+    prev_state = (h0, c0)
+
+    out, next_state = memory_module(current_context, prev_state)
+
+    print("output shape:", out.shape)             # [B, hidden_dim]
+    print("h shape:", next_state[0].shape)        # [1, B, hidden_dim]
+    print("c shape:", next_state[1].shape)        # [1, B, hidden_dim]
+
+memorytest()
+
