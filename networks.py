@@ -96,7 +96,7 @@ def policytest():
 
     state = torch.randn((batch_size, embd_dim))
 
-    location, stop_prob = policy(state)
+    location, stop_prob, _ = policy(state)
 
     print("location shape:", location.shape)
     print("stop prob shape:", stop_prob.shape)
