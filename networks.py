@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import make_glimpse_grid
+
 class PerceptionPolicy(nn.Module):
     def __init__(self, embd_dim):
         super().__init__()
@@ -25,7 +27,7 @@ class PerceptionPolicy(nn.Module):
 
     
 class PerceptionEncoder(nn.Module):
-    def __init__(self, in_channels, input_shape, embd_size):
+    def __init__(self, in_channels, input_shape, embd_dim):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(3,3), stride=1)
         shape = input_shape - 3 + 1
@@ -33,7 +35,7 @@ class PerceptionEncoder(nn.Module):
         shape = shape - 3 + 1
 
         self.confidence_head = nn.Linear(shape * shape * 128, 1)
-        self.encoding_head = nn.Linear(shape * shape * 128, embd_size)
+        self.encoding_head = nn.Linear(shape * shape * 128, embd_dim)
 
     def forward(self, img_patch):
         """
@@ -71,6 +73,38 @@ class ContextMemory(nn.Module):
         return output.squeeze(0), next_state  
 
 
+def policytest():
+    embd_dim = 256
+    batch_size = 1
+
+    policy = PerceptionPolicy(embd_dim)
+
+    state = torch.randn((batch_size, embd_dim))
+
+    location, stop_prob = policy(state)
+
+    print("location shape:", location.shape)
+    print("stop prob shape:", stop_prob.shape)
+
+def perceptiontest():
+    in_channels = 3
+    input_shape = 12
+    image_size = 64
+    embd_dim = 256
+
+    perception_module = PerceptionEncoder(in_channels, input_shape, embd_dim)
+
+    image = torch.randn((1, in_channels, image_size, image_size))
+    center = torch.tensor([[0.0, 0.0]])
+    grid = make_glimpse_grid(center,input_shape, 64)
+    img_patch = torch.nn.functional.grid_sample(image, grid, align_corners=True)
+
+    confidence, encoding = perception_module(img_patch)
+
+    print("Patch shape:", img_patch.shape)
+    print("Encoding shape:", encoding.shape)
+    print("Confidence shape:", confidence.shape)
+
 def memorytest():
     embd_dim = 256
     batch_size = 1
@@ -85,11 +119,13 @@ def memorytest():
     c0 = torch.zeros(1, batch_size, embd_dim)
     prev_state = (h0, c0)
 
-    out, next_state = memory_module(current_context, prev_state)
+    out, (current_context, cell_state) = memory_module(current_context, prev_state)
 
-    print("output shape:", out.shape)             # [B, hidden_dim]
-    print("h shape:", next_state[0].shape)        # [1, B, hidden_dim]
-    print("c shape:", next_state[1].shape)        # [1, B, hidden_dim]
+    print("output shape:", out.shape)               # [B, hidden_dim]
+    print("h shape:", current_context.shape)        # [1, B, hidden_dim]
+    print("c shape:", cell_state.shape)             # [1, B, hidden_dim]
 
+policytest()
+perceptiontest()
 memorytest()
 
