@@ -8,7 +8,8 @@ class PerceptionPolicy(nn.Module):
     def __init__(self, embd_dim):
         super().__init__()
         self.fc1 = nn.Linear(embd_dim, 64)
-        self.location_head = nn.Linear(64, 2)
+        self.loc_mean_head = nn.Linear(64, 2)
+        self.loc_log_std = nn.Parameter(torch.zeros(2))
         self.stop_head = nn.Linear(64, 1)
         
     
@@ -17,12 +18,20 @@ class PerceptionPolicy(nn.Module):
         current_context: [B, embd_D] -- context for current step
         --------------------------------------------------------
         location: [B, 2] --> [B, (x,y)]
+        dist: Normal distribution
         stop_prob: [B, 1]
         """
-        x = F.relu(self.fc1(current_context))               
-        location = F.tanh(self.location_head(x))
+        x = F.relu(self.fc1(current_context))      
+
+        mean = F.tanh(self.loc_mean_head(x))
+        std = torch.exp(self.loc_log_std) 
+
+        dist = torch.distributions.Normal(mean, std)
+        location = dist.rsample()
+        location = torch.clamp(location, -1.0, 1.0)
+
         stop_prob = torch.sigmoid(self.stop_head(x))
-        return location, stop_prob
+        return location, stop_prob, dist
     
 
     
@@ -55,23 +64,29 @@ class PerceptionEncoder(nn.Module):
 
 
 class ContextMemory(nn.Module):
-    def __init__(self, embd_dim, hidden_dim):
+    def __init__(self, embd_dim):
         super().__init__()
-        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=hidden_dim, num_layers=1, batch_first=False)
+        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim, num_layers=1, batch_first=False)
 
     def forward(self, current_context, prev_state):
         """
         current_context: [1, B, embd_D] -- 1 timestep input
         prev_state: tuple (h, c)
-         - h: [1, B, hidden_dim]
-         - c: [1, B, hidden_dim]
+         - h: [1, B, embd_dim]
+         - c: [1, B, embd_dim]
         Returns:
-        - output: [1, B, hidden_dim]
+        - output: [1, B, embd_dim]
         - next_state: (h, c)
         """
         output, next_state = self.rnn(current_context, prev_state)
         return output.squeeze(0), next_state  
 
+class Classifier(nn.Module):
+    def __init__(self, embd_dim, n_classes):
+        self.fc1 = nn.Linear(embd_dim, n_classes)
+    
+    def forward(self, embeding):
+        return F.softmax(self.fc1(embeding), dim=-1)
 
 def policytest():
     embd_dim = 256
@@ -96,7 +111,7 @@ def perceptiontest():
 
     image = torch.randn((1, in_channels, image_size, image_size))
     center = torch.tensor([[0.0, 0.0]])
-    grid = make_glimpse_grid(center,input_shape, 64)
+    grid = make_glimpse_grid(center, input_shape, 64)
     img_patch = torch.nn.functional.grid_sample(image, grid, align_corners=True)
 
     confidence, encoding = perception_module(img_patch)
@@ -109,7 +124,7 @@ def memorytest():
     embd_dim = 256
     batch_size = 1
 
-    memory_module = ContextMemory(embd_dim=embd_dim, hidden_dim=embd_dim)
+    memory_module = ContextMemory(embd_dim=embd_dim)
 
     # Simulate one timestep of input: [seq_len=1, B, D]
     current_context = torch.randn((1, batch_size, embd_dim))
