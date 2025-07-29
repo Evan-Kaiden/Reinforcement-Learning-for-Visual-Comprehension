@@ -43,6 +43,7 @@ class glimpseAgent():
                 while step < max_steps:
                     # Run current context through policy
                     location, raw_location, stop_prob, dist = self.policy_model(current_context.squeeze(0))
+                    raw_location = raw_location.clone()
 
                     if stop_prob > stop_thresh:
                         break
@@ -60,13 +61,10 @@ class glimpseAgent():
 
                     encodings.append(encoding)
                     confidences.append(confidence.unsqueeze(0))
-                    print(encoding.shape)
-
                     # pass encoding through memory model to update memory
                     _, (current_context, cell_state) = self.memory_model(encoding, (current_context, cell_state))
 
                     step += 1
-                    print(step)
 
 
                 encodings = torch.stack(encodings).view(step, self.memory_model.embd_dim)
@@ -75,13 +73,11 @@ class glimpseAgent():
                 h0 = torch.zeros(1, self.memory_model.embd_dim)
                 c0 = torch.zeros(1, self.memory_model.embd_dim)
                 prev_state = (h0, c0)
-
-
   
-                vals = torch.mul(encodings, confidences)
+                vals = encodings * confidences 
 
                 _, (current_context, cell_state) = self.memory_model(vals, prev_state)
-
+                current_context = current_context.detach()
 
                 outputs = self.classifier_model(current_context)
                 _, predicted = outputs.max(1)
@@ -93,9 +89,12 @@ class glimpseAgent():
                 rewards = reward.expand_as(log_probs)
 
                 policy_loss = -(log_probs * rewards.detach()).mean()  
-                entropy = dist.entropy().sum(dim=-1).mean()
+                
+                with torch.no_grad():
+                    _, _, _, entropy_dist = self.policy_model(current_context.squeeze(0))
+                    entropy = entropy_dist.entropy().sum(dim=-1).mean()
 
-                policy_loss -= 0.01 * entropy
+                policy_loss = policy_loss - 0.01 * entropy
                 classification_loss = criterion(outputs, targets)
 
                 self.policy_optimizer.zero_grad()
@@ -103,9 +102,7 @@ class glimpseAgent():
                 self.policy_optimizer.step()
 
                 self.supervised_optimizer.zero_grad()
-                with torch.autograd.set_detect_anomaly(True):
-                    classification_loss.backward()
+                classification_loss.backward()
                 self.supervised_optimizer.step()
-                print('ran')
                 
 
