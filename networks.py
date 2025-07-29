@@ -24,15 +24,16 @@ class PerceptionPolicy(nn.Module):
         x = F.relu(self.fc1(current_context))      
 
         mean = F.tanh(self.loc_mean_head(x))
-        std = torch.exp(self.loc_log_std) 
+        std = torch.exp(self.loc_log_std).expand_as(mean)
 
         dist = torch.distributions.Normal(mean, std)
-        location = dist.rsample()
-        location = torch.clamp(location, -1.0, 1.0)
+        raw_location = dist.rsample()
+        location = torch.tanh(raw_location) 
 
         stop_prob = torch.sigmoid(self.stop_head(x))
-        return location, stop_prob, dist
-    
+
+        return location, raw_location, stop_prob, dist
+        
 
     
 class PerceptionEncoder(nn.Module):
@@ -66,6 +67,7 @@ class PerceptionEncoder(nn.Module):
 class ContextMemory(nn.Module):
     def __init__(self, embd_dim):
         super().__init__()
+        self.embd_dim = embd_dim
         self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim, num_layers=1, batch_first=False)
 
     def forward(self, current_context, prev_state):
@@ -83,6 +85,7 @@ class ContextMemory(nn.Module):
 
 class Classifier(nn.Module):
     def __init__(self, embd_dim, n_classes):
+        super().__init__()
         self.fc1 = nn.Linear(embd_dim, n_classes)
     
     def forward(self, embeding):
@@ -140,7 +143,8 @@ def memorytest():
     print("h shape:", current_context.shape)        # [1, B, hidden_dim]
     print("c shape:", cell_state.shape)             # [1, B, hidden_dim]
 
-policytest()
-perceptiontest()
-memorytest()
+if __name__ == '__main__':
+    policytest()
+    perceptiontest()
+    memorytest()
 
