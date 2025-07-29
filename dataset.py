@@ -1,18 +1,10 @@
 from torchvision import datasets as dsets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
+import torch
 
-train_transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
+train_data = dsets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
+test_data = dsets.MNIST(root='./data', train=False, download=True, transform=transforms.ToTensor())
 
-test_transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
-
-train_data = dsets.CIFAR10(root='./data', train=True, download=True, transform=train_transform)
-test_data = dsets.CIFAR10(root='./data', train=False, download=True, transform=test_transform)
-
-trainloader = DataLoader(train_data, batch_size=1, shuffle=True)
-testloader = DataLoader(test_data, batch_size=1, shuffle=False)
+# Note: batch_size=1 is fine for episode-based training, but can be increased
+trainloader = DataLoader(train_data, batch_size=32, shuffle=True)
+testloader = DataLoader(test_data, batch_size=32, shuffle=False)
