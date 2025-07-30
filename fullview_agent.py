@@ -2,72 +2,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from math import sqrt
+
 from dataset import trainloader, testloader
-
-# -------- helpers --------
-def make_glimpse_grid(center, g, S, align_corners=True):
-    # center: [B,2] in [-1,1] (x,y), return [B,g,g,2]
-    B = center.size(0)
-    lin = torch.linspace(-1, 1, g, device=center.device, dtype=center.dtype)
-    gy, gx = torch.meshgrid(lin, lin, indexing='ij')
-    base = torch.stack([gx, gy], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
-    if align_corners:
-        scale = (g - 1) / max(S - 1, 1)
-    else:
-        scale = g / S
-    grid = center.view(B, 1, 1, 2) + scale * base
-    return grid.clamp_(-1, 1)
-
-def tiled_centers(S, g, stride=None, device=None, dtype=None):
-    # row-major scan; returns [T,2] centers in [-1,1], align_corners=True
-    s = g if stride is None else stride
-    def axis_pos(S, g, s):
-        p, out = 0, [0]
-        last = S - g
-        while p < last:
-            p = min(p + s, last)
-            out.append(p)
-        return torch.tensor(out, device=device, dtype=torch.float32 if dtype is None else dtype)
-    xs = axis_pos(S, g, s)
-    ys = axis_pos(S, g, s)
-    cx = xs + (g - 1)/2
-    cy = ys + (g - 1)/2
-    gy, gx = torch.meshgrid(cy, cx, indexing='ij')
-    x_norm = 2*gx/(S-1) - 1
-    y_norm = 2*gy/(S-1) - 1
-    return torch.stack([x_norm.reshape(-1), y_norm.reshape(-1)], dim=-1)  # [T,2]
+from utils import make_glimpse_grid, tiled_centers
 
 # -------- model --------
 class fullglimpseAgent(nn.Module):
-    def __init__(self, image_size=28, patch_size=14, stride=None, n_classes=10, embd_dim=256, in_ch=1, device=None):
+    def __init__(self, encoder, memory, classifier, gate, image_size=28, patch_size=14, stride=None, n_classes=10, embd_dim=256, in_ch=1, device=None):
         super().__init__()
         self.device = device
         self.S = image_size
         self.g = patch_size
         self.stride = stride if stride is not None else patch_size  # non-overlap default
 
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_ch, 32, 3), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 3),   nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1)  # -> [B,64,1,1]
-        )
-        self.proj = nn.Linear(64, embd_dim)
-
-        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim,
-                           num_layers=1, batch_first=True)  # outputs [B,T,D]
-
-        self.gate = nn.Sequential(
-            nn.Linear(embd_dim, 128), nn.Tanh(),
-            nn.Linear(128, 1)
-        )
+        self.encoder = encoder.to(device).float()
+        self.rnn = memory.to(device).float()
+        self.classifier = classifier.to(device).float()
+        self.gate = gate.to(device).float()
 
         # start near average pooling (stability)
-        nn.init.zeros_(self.gate[-1].weight)
-        nn.init.zeros_(self.gate[-1].bias)
+        nn.init.zeros_(self.gate.gate[-1].weight)
+        nn.init.zeros_(self.gate.gate[-1].bias)
 
-        self.classifier = nn.Linear(embd_dim, n_classes)
         self.attn_tau = 0.5  # temperature; 0.3–1.0 works
-
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
 
@@ -105,12 +63,13 @@ class fullglimpseAgent(nn.Module):
         # retina patches -> features per tile
         patches = self._retina(x, centers)                 # [B,T,C*,g,g]
         B_, T_, C_, g, _ = patches.shape
-        feats = self.encoder(patches.reshape(B*T, C_, g, g)).flatten(1)  # [B*T,64]
-        feats = self.proj(feats).view(B, T, -1)            # [B,T,D]
+        feats = self.encoder(patches.reshape(B*T, C_, g, g)).view(B, T, -1)    # [B,T,D]
+
 
         # LSTM over time
         rnn_out, _ = self.rnn(feats)                       # [B,T,D]
-
+        if len(rnn_out.shape) < 3:
+            rnn_out = rnn_out.unsqueeze(0)
         # learned temporal gate (soft attention) over LSTM outputs
         scores = self.gate(rnn_out)                        # [B,T,1]
         alpha  = torch.softmax(scores / self.attn_tau, dim=1)  # [B,T,1]
@@ -123,6 +82,8 @@ class fullglimpseAgent(nn.Module):
         self.train()
         for _ in range(epochs):
             for imgs, targets in trainloader:
+                if self.device is not None:
+                    imgs, targets = imgs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
                 logits, _ = self.forward(imgs)
                 loss = self.criterion(logits, targets)
 
@@ -131,9 +92,9 @@ class fullglimpseAgent(nn.Module):
                 self.optimizer.step()
     
             if testloader is not None:
-                self.eval(testloader)
+                self.eval_agent(testloader)
 
-    def eval(self, test_loader):
+    def eval_agent(self, testloader):
         self.eval()
 
         total = 0
@@ -141,7 +102,7 @@ class fullglimpseAgent(nn.Module):
         loss_sum = 0.0
 
         with torch.no_grad():
-            for x, y in test_loader:
+            for x, y in testloader:
                 if self.device is not None:
                     x = x.to(self.device, non_blocking=True)
                     y = y.to(self.device, non_blocking=True)
@@ -164,10 +125,23 @@ class fullglimpseAgent(nn.Module):
         else:
             print(f"Test accuracy: {acc:.4f} | N={total}")
             return acc, None
+        
+    def plot(self, x):
+        if self.device is not None:
+            x.to(self.device, non_blocking=True)
+        _, alpha = self.forward(x)
+        h = w = alpha[0].shape[0] // sqrt(alpha[0].shape[0])
+        alpha = alpha[0].reshape(1, h, w)
+        
+        import matplotlib.pyplot as plt
+        plt.imshow(alpha.squeeze().detach().cpu().numpy(), cmap='hot', interpolation='nearest')
+        plt.colorbar()
+        plt.title('Attention Weights')
+        plt.show()
 
 
 
-agent = fullglimpseAgent(image_size=28, patch_size=6, stride=3,
-                         n_classes=10, embd_dim=256, in_ch=1, device='mps')
+# agent = fullglimpseAgent(image_size=28, patch_size=6, stride=9,
+#                          n_classes=10, embd_dim=256, in_ch=1, device='mps')
 
-agent.train_agent(epochs=10, trainloader=trainloader, testloader=testloader)
+# agent.train_agent(epochs=10, trainloader=trainloader, testloader=testloader)
