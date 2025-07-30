@@ -2,85 +2,101 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import make_glimpse_grid
-
 class PerceptionPolicy(nn.Module):
     def __init__(self, embd_dim):
         super().__init__()
-        self.fc1 = nn.Linear(embd_dim, 64)
-        self.loc_mean_head = nn.Linear(64, 2)
+        self.fc1 = nn.Linear(embd_dim, 16)
+        self.loc_mean_head = nn.Linear(16, 2)
         self.loc_log_std = nn.Parameter(torch.zeros(2))
-        self.stop_head = nn.Linear(64, 1)
+        self.stop_head = nn.Linear(16, 1)
+        self.baseline_head = nn.Linear(16, 1)
         
     
     def forward(self, current_context):
         """
-        current_context: [B, embd_D] -- context for current step
-        --------------------------------------------------------
-        location: [B, 2] --> [B, (x,y)]
-        dist: Normal distribution
-        stop_prob: [B, 1]
+        Inputs:
+            current_context: [B, embd_D] -- context for current step
+        Returns:
+            location: [B, 2] --> [B, (x,y)]
+            dist: Normal distribution
+            stop_prob: [B, 1]
         """
         x = F.relu(self.fc1(current_context))      
 
         mean = F.tanh(self.loc_mean_head(x))
-        std = torch.exp(self.loc_log_std).expand_as(mean)
+        std = torch.exp(torch.clamp(self.loc_log_std, -1.5, 0.5)).expand_as(mean)
 
         dist = torch.distributions.Normal(mean, std)
         raw_location = dist.rsample()
-        location = torch.tanh(raw_location) 
+        location = torch.clamp(raw_location, -1, 1)
 
         stop_prob = torch.sigmoid(self.stop_head(x))
+        baseline = self.baseline_head(x)
 
-        return location, raw_location, stop_prob, dist
+        return location, raw_location, stop_prob, dist, baseline
         
 
     
 class PerceptionEncoder(nn.Module):
     def __init__(self, in_channels, input_shape, embd_dim):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=(3,3), stride=1)
-        shape = input_shape - 3 + 1
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=(3,3), stride=1)
-        shape = shape - 3 + 1
-
-        self.confidence_head = nn.Linear(shape * shape * 128, 1)
-        self.encoding_head = nn.Linear(shape * shape * 128, embd_dim)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3), nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, 3),   nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1)  # -> [B,64,1,1]
+        )
+        self.proj = nn.Linear(64, embd_dim)
 
     def forward(self, img_patch):
         """
-        img_patch: [B, C, H, W]
-        --------------------------------------------------------        
-        confidence: [B, 1]
-        encoding: [B, embd_D]
+        Inputs:
+            img_patch: [B, C, H, W]
+        Returns:        
+            encoding: [B, embd_D]
         """
-        x = F.relu(self.conv1(img_patch))
-        x = F.relu(self.conv2(x))
-        x = x.flatten(1)
+        x = self.encoder(img_patch)
+        x = x.view(x.size(0), -1) 
+        encoding = self.proj(x)
 
-        confidence = torch.sigmoid(self.confidence_head(x))
-        encoding = self.encoding_head(x)
+        return encoding
 
-        return confidence, encoding
+class gate(nn.Module):
+    def __init__(self, embd_dim):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(embd_dim, 128), nn.Tanh(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, embedding):
+        """
+        Inputs: 
+            embedding: [B, embd_dim]
+        Returns:
+            output: [B, 1]
+        """
+        return self.gate(embedding)
+    
 
 
 class ContextMemory(nn.Module):
-    def __init__(self, embd_dim):
+    def __init__(self, embd_dim, n_layers=1):
         super().__init__()
         self.embd_dim = embd_dim
-        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim, num_layers=1, batch_first=False)
+        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim, num_layers=n_layers, batch_first=True)
 
-    def forward(self, current_context, prev_state):
+    def forward(self, current_context):
         """
-        current_context: [1, B, embd_D] -- 1 timestep input
-        prev_state: tuple (h, c)
-         - h: [1, B, embd_dim]
-         - c: [1, B, embd_dim]
+        Inputs:
+            current_context: [B, T, embd_D] -- 1 timestep input
+            prev_state: tuple (h, c), T = 1
+            - h: [B, T, embd_dim]
+            - c: [B, T, embd_dim]
         Returns:
-        - output: [1, B, embd_dim]
-        - next_state: (h, c)
+            - output: [B, T, embd_dim]
+            - next_state: (h, c)
         """
-        output, next_state = self.rnn(current_context, prev_state)
+        output, next_state = self.rnn(current_context)
         return output.squeeze(0), next_state  
 
 class Classifier(nn.Module):
@@ -89,62 +105,9 @@ class Classifier(nn.Module):
         self.fc1 = nn.Linear(embd_dim, n_classes)
     
     def forward(self, embeding):
-        return F.softmax(self.fc1(embeding), dim=-1)
-
-def policytest():
-    embd_dim = 256
-    batch_size = 1
-
-    policy = PerceptionPolicy(embd_dim)
-
-    state = torch.randn((batch_size, embd_dim))
-
-    location, stop_prob, _ = policy(state)
-
-    print("location shape:", location.shape)
-    print("stop prob shape:", stop_prob.shape)
-
-def perceptiontest():
-    in_channels = 3
-    input_shape = 12
-    image_size = 64
-    embd_dim = 256
-
-    perception_module = PerceptionEncoder(in_channels, input_shape, embd_dim)
-
-    image = torch.randn((1, in_channels, image_size, image_size))
-    center = torch.tensor([[0.0, 0.0]])
-    grid = make_glimpse_grid(center, input_shape, 64)
-    img_patch = torch.nn.functional.grid_sample(image, grid, align_corners=True)
-
-    confidence, encoding = perception_module(img_patch)
-
-    print("Patch shape:", img_patch.shape)
-    print("Encoding shape:", encoding.shape)
-    print("Confidence shape:", confidence.shape)
-
-def memorytest():
-    embd_dim = 256
-    batch_size = 1
-
-    memory_module = ContextMemory(embd_dim=embd_dim)
-
-    # Simulate one timestep of input: [seq_len=1, B, D]
-    current_context = torch.randn((1, batch_size, embd_dim))
-
-    # Initialize LSTM state (h, c): both [1, B, H]
-    h0 = torch.zeros(1, batch_size, embd_dim)
-    c0 = torch.zeros(1, batch_size, embd_dim)
-    prev_state = (h0, c0)
-
-    out, (current_context, cell_state) = memory_module(current_context, prev_state)
-
-    print("output shape:", out.shape)               # [B, hidden_dim]
-    print("h shape:", current_context.shape)        # [1, B, hidden_dim]
-    print("c shape:", cell_state.shape)             # [1, B, hidden_dim]
-
-if __name__ == '__main__':
-    policytest()
-    perceptiontest()
-    memorytest()
-
+        """
+        embedding: [B, embd_dim]
+        Returns:
+        - output: [B, n_classes]
+        """
+        return self.fc1(embeding)
