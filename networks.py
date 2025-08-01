@@ -3,13 +3,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class PerceptionPolicy(nn.Module):
-    def __init__(self, embd_dim):
+    def __init__(self, action_space, embd_dim):
         super().__init__()
-        self.fc1 = nn.Linear(embd_dim, 16)
-        self.loc_mean_head = nn.Linear(16, 2)
-        self.loc_log_std = nn.Parameter(torch.zeros(2))
-        self.stop_head = nn.Linear(16, 1)
-        self.baseline_head = nn.Linear(16, 1)
+        self.action_space = action_space
+
+        self.fc1 = nn.Linear(embd_dim, 256)
+        self.dist_head = nn.Linear(256, action_space)
+        self.stop_head = nn.Linear(256, 1)
         
     
     def forward(self, current_context):
@@ -17,23 +17,16 @@ class PerceptionPolicy(nn.Module):
         Inputs:
             current_context: [B, embd_D] -- context for current step
         Returns:
-            location: [B, 2] --> [B, (x,y)]
-            dist: Normal distribution
-            stop_prob: [B, 1]
+            dist: [B, Action Space]
+            stop_logits: [B, 1]
         """
         x = F.relu(self.fc1(current_context))      
 
-        mean = F.tanh(self.loc_mean_head(x))
-        std = torch.exp(torch.clamp(self.loc_log_std, -1.5, 0.5)).expand_as(mean)
 
-        dist = torch.distributions.Normal(mean, std)
-        raw_location = dist.rsample()
-        location = torch.clamp(raw_location, -1, 1)
+        logits = self.dist_head(x)
+        stop_logits = self.stop_head(x)
 
-        stop_prob = torch.sigmoid(self.stop_head(x))
-        baseline = self.baseline_head(x)
-
-        return location, raw_location, stop_prob, dist, baseline
+        return logits, stop_logits
         
 
     
