@@ -18,13 +18,14 @@ class GlimpseAgent(nn.Module):
     loop can compute the losses.
     """
 
-    def __init__(self, policy, encoder, classifier, gate, gamma = 0.99, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
+    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.001,gamma = 0.99, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
         super().__init__()
 
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.S = image_size   # input image resolution (assume square)
         self.p = patch_size   # size of extracted glimpse
         self.gamma = gamma
+        self.step_cost = step_cost
 
         #  Feature extractor, attention gate, and classifier
         self.encoder = encoder.to(self.device)
@@ -122,7 +123,7 @@ class GlimpseAgent(nn.Module):
     #  Forward rollout
     # ---------------------------------------------------------------------
 
-    def forward(self, x, targets = None, max_steps = 16):
+    def forward(self, x, targets = None, max_steps = 64):
         """Run a glimpse episode.
 
         Returns
@@ -138,12 +139,12 @@ class GlimpseAgent(nn.Module):
         # initial hidden state
         h_t = x.new_zeros(B, self.memory.hidden_size)
         c_t = x.new_zeros(B, self.memory.hidden_size)
-        prev_ctx = h_t
+        prev_ctx = h_t.detach()
 
         logps, entropies, rewards, seq_feats, values = [], [], [], [], []
 
         for t in range(max_steps):
-            action_logits, stop_logits = self.policy(prev_ctx)
+            action_logits, stop_logits = self.policy(prev_ctx.detach())
 
             act_dist = Categorical(logits=action_logits)
             stop_dist = Bernoulli(logits=stop_logits.squeeze(-1))
@@ -156,22 +157,24 @@ class GlimpseAgent(nn.Module):
 
             patch = self._retina_step(x, self._idx_to_coord(idx))
             feat_t = self.encoder(patch).view(B, -1)
-            baseline_t = self.value_head(feat_t.detach()).squeeze(-1)
+            baseline_t = self.value_head(prev_ctx.detach()).squeeze(-1)
 
             h_t, c_t = self.memory(feat_t, (h_t, c_t))
-            prev_ctx = h_t  # next‑step policy context
+            prev_ctx = h_t.detach()  # next‑step policy context
 
             values.append(baseline_t)
             seq_feats.append(feat_t.unsqueeze(1))
 
             if t == 0 and targets is not None:
-                rewards.append(torch.zeros(B, device=device))
-                prev_logits = self._forward_seq(seq_feats) # next-step reward context
+                with torch.no_grad():
+                    rewards.append(torch.zeros(B, device=device) - self.step_cost) 
+                    prev_logits = self._forward_seq(seq_feats) # next-step reward context
 
             elif targets is not None:
-                logits = self._forward_seq(seq_feats) # next-step reward context
-                step_reward = self._confidence_reward(logits, prev_logits, targets) 
-                rewards.append(step_reward)
+                with torch.no_grad():
+                    logits = self._forward_seq(seq_feats) # next-step reward context
+                    step_reward = self._confidence_reward(logits, prev_logits, targets) - self.step_cost
+                    rewards.append(step_reward)
 
             if stop.bool().all():
                 break
@@ -206,7 +209,8 @@ class GlimpseAgent(nn.Module):
     def train_agent(self, epochs: int, trainloader, testloader=None, *, max_steps: int = 16):
         self.train()
         for _ in range(epochs):
-            with tqdm(total=len(trainloader), desc="Train") as pbar:
+            with tqdm(total=len(trainloader), desc="Train", postfix={'Policy Loss' : 0, 'Classification Loss' : 0, 'Value Loss' : 0}) as pbar:
+                total_policy_loss, total_value_loss, total_classification_loss, total = 0.0, 0.0, 0.0, 0.0
                 for imgs, targets in trainloader:
                     imgs, targets = imgs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
 
@@ -214,14 +218,17 @@ class GlimpseAgent(nn.Module):
 
                     # Supervised loss --------------------------------------------------
                     cls_loss = self.classification_criterion(logits, targets)
+                    total_classification_loss += cls_loss.item()
 
                     # Policy loss ------------------------------------------------------
                     policy_loss = -(logps * advantages.detach()).mean()
                     entropy_loss = -(self.entropy_weight * entropies.mean())
                     rl_loss = policy_loss + entropy_loss
+                    total_policy_loss += rl_loss.item()
 
                     # Value loss -------------------------------------------------------
                     value_loss = 0.5 * (values - returns.detach()).pow(2).mean()
+                    total_value_loss += value_loss.item()
 
                     #  Back‑prop RL branch first ---------------------------------------
                     self.value_optimizer.zero_grad()
@@ -236,8 +243,10 @@ class GlimpseAgent(nn.Module):
                     self.classification_optimizer.zero_grad()
                     cls_loss.backward()
                     self.classification_optimizer.step()
-
                     pbar.update(1)
+                    total += 1 
+
+                pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 'Value Loss' : total_value_loss / total})
 
             if testloader is not None:
                 self.eval_agent(testloader, max_steps=max_steps)
