@@ -18,7 +18,7 @@ class GlimpseAgent(nn.Module):
     loop can compute the losses.
     """
 
-    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.001,gamma = 0.99, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
+    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.001,gamma = 0.96, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
         super().__init__()
 
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -103,7 +103,7 @@ class GlimpseAgent(nn.Module):
         """Per step reward based on confidence improvement"""
         ce0 = F.cross_entropy(logits_t0, targets, reduction='none')
         ce1 = F.cross_entropy(logits_t1, targets, reduction='none')
-        return ce0 - ce1
+        return F.tanh(ce0 - ce1)
 
     def _forward_seq(self, seq_feats):
         """forward pass on a sequence of features"""
@@ -123,7 +123,7 @@ class GlimpseAgent(nn.Module):
     #  Forward rollout
     # ---------------------------------------------------------------------
 
-    def forward(self, x, targets = None, max_steps = 64):
+    def forward(self, x, targets = None, max_steps = 8):
         """Run a glimpse episode.
 
         Returns
@@ -186,8 +186,8 @@ class GlimpseAgent(nn.Module):
         # final reward: 1 if prediction correct else 0 ----------------------
         if targets is not None:
             preds = logits.argmax(dim=1)
-            final_r = (preds == targets).float()  # [B]
-            rewards[-1] = final_r                 # replace last reward
+            final_r = -1.0 if not (preds == targets).bool() else 1.0  # [B]
+            rewards[-1] += final_r  # last reward
         else:
             # Evaluation mode... no RL signal
             rewards = [torch.zeros(B, device=device)] * len(seq_feats)
@@ -206,15 +206,19 @@ class GlimpseAgent(nn.Module):
     #  Training helpers
     # ------------------------------------------------------------------
 
-    def train_agent(self, epochs: int, trainloader, testloader=None, *, max_steps: int = 16):
+    def train_agent(self, epochs, trainloader, testloader=None, start_steps=8, max_steps=32):
         self.train()
-        for _ in range(epochs):
-            with tqdm(total=len(trainloader), desc="Train", postfix={'Policy Loss' : 0, 'Classification Loss' : 0, 'Value Loss' : 0}) as pbar:
+        for epoch in range(epochs):
+            with tqdm(total=len(trainloader), desc="Train", postfix={'Policy Loss' : 0, 'Classification Loss' : 0, 'Value Loss' : 0, 'Max Steps' : start_steps}) as pbar:
+
+                # Max Step schedule -----------------------------------------------------
+                steps = min(start_steps + 2 * epoch, max_steps)
+
                 total_policy_loss, total_value_loss, total_classification_loss, total = 0.0, 0.0, 0.0, 0.0
                 for imgs, targets in trainloader:
                     imgs, targets = imgs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
 
-                    logits, logps, advantages, returns, values, entropies = self.forward(imgs, targets, max_steps=max_steps)
+                    logits, logps, advantages, returns, values, entropies = self.forward(imgs, targets, max_steps=steps)
 
                     # Supervised loss --------------------------------------------------
                     cls_loss = self.classification_criterion(logits, targets)
@@ -235,7 +239,8 @@ class GlimpseAgent(nn.Module):
                     self.reinforce_optimizer.zero_grad()
                     rl_loss.backward(retain_graph=True)
                     value_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 5.0)
+                    torch.nn.utils.clip_grad_norm_(self.value_head.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
                     self.reinforce_optimizer.step()
                     self.value_optimizer.step()
 
@@ -246,7 +251,8 @@ class GlimpseAgent(nn.Module):
                     pbar.update(1)
                     total += 1 
 
-                pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 'Value Loss' : total_value_loss / total})
+                pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 
+                                  'Value Loss' : total_value_loss / total, 'Max Steps' : steps})
 
             if testloader is not None:
                 self.eval_agent(testloader, max_steps=max_steps)
