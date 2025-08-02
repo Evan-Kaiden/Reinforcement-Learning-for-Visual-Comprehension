@@ -6,5 +6,5 @@ train_data = dsets.MNIST(root='./data', train=True, download=True, transform=tra
 test_data = dsets.MNIST(root='./data', train=False, download=True, transform=transforms.ToTensor())
 
 # Note: batch_size=1 is fine for episode-based training, but can be increased
-trainloader = DataLoader(train_data, batch_size=32, shuffle=True)
-testloader = DataLoader(test_data, batch_size=32, shuffle=False)
+trainloader = DataLoader(train_data, batch_size=1, shuffle=True)
+testloader = DataLoader(test_data, batch_size=1, shuffle=False)
