@@ -1,5 +1,5 @@
 import torch
-
+ 
 def make_glimpse_grid(center, g, S, align_corners=True):
     # center: [B,2] in [-1,1] (x,y), return [B,p,p,2]
     B = center.size(0)
