@@ -18,7 +18,7 @@ class GlimpseAgent(nn.Module):
     loop can compute the losses.
     """
 
-    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.001,gamma = 0.96, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
+    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.0001, gamma = 0.96, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
         super().__init__()
 
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,7 +40,9 @@ class GlimpseAgent(nn.Module):
         self.rnn = nn.LSTM(embd_dim, embd_dim, batch_first=True).to(self.device)
 
         #  value head  (decrease variance of REINFORCE)
-        self.value_head = nn.Linear(embd_dim, 1).to(self.device)
+        self.cricit = nn.Sequential(nn.Linear(embd_dim, 128),
+                                    nn.ReLU(), 
+                                    nn.Linear(128, 1)).to(self.device)
 
         #  Small stability tweaks ------------------------------------------------
         if hasattr(self.gate, "gate"):
@@ -68,7 +70,7 @@ class GlimpseAgent(nn.Module):
             lr=1e-3,
         )
         self.reinforce_optimizer = torch.optim.Adam(self.policy.parameters(), lr=1e-4)
-        self.value_optimizer = torch.optim.Adam(self.value_head.parameters(), lr=1e-4)
+        self.cricit_optimizer = torch.optim.Adam(self.cricit.parameters(), lr=5e-4)
 
     def _retina_step(self, x, center):
         """Extract pxp patch around center (in [-1,1] coords)."""
@@ -157,9 +159,10 @@ class GlimpseAgent(nn.Module):
 
             patch = self._retina_step(x, self._idx_to_coord(idx))
             feat_t = self.encoder(patch).view(B, -1)
-            baseline_t = self.value_head(prev_ctx.detach()).squeeze(-1)
+            
 
             h_t, c_t = self.memory(feat_t, (h_t, c_t))
+            baseline_t = self.cricit(h_t.detach()).squeeze(-1)
             prev_ctx = h_t.detach()  # next‑step policy context
 
             values.append(baseline_t)
@@ -203,19 +206,20 @@ class GlimpseAgent(nn.Module):
     
     
     @torch.no_grad()
-    def greedy_forward(self, x, max_steps):
+    def greedy_forward(self, x, max_steps=32):
         """Run a greedy episode.
 
         Returns
         -------
         logits : [B, n_classes]
+        steps : int
         """
         B, _, _, _ = x.shape
 
         # initial hidden state
         h_t = x.new_zeros(B, self.memory.hidden_size)
         c_t = x.new_zeros(B, self.memory.hidden_size)
-        prev_ctx = h_t.detach()
+        prev_ctx = h_t
 
         seq_feats = []
         steps = 0
@@ -223,20 +227,22 @@ class GlimpseAgent(nn.Module):
         for t in range(max_steps):
             action_logits, stop_logits = self.policy(prev_ctx.detach())
 
+            # greedy action
             idx = torch.argmax(action_logits, dim=1)
-            stop = torch.argmax(stop_logits.unsqueeze(-1))
+            s = F.sigmoid(stop_logits.squeeze(-1))          # [B]
+            stop = (s > 0.5).bool()        
 
 
             patch = self._retina_step(x, self._idx_to_coord(idx))
             feat_t = self.encoder(patch).view(B, -1)
 
             h_t, c_t = self.memory(feat_t, (h_t, c_t))
-            prev_ctx = h_t.detach()  # next‑step policy context
+            prev_ctx = h_t  # next‑step policy context
 
             seq_feats.append(feat_t.unsqueeze(1))
             steps += 1
 
-            if stop.bool().all():
+            if stop:
                 break
 
         # final class prediction 
@@ -249,7 +255,7 @@ class GlimpseAgent(nn.Module):
     #  Training helpers
     # ------------------------------------------------------------------
 
-    def train_agent(self, epochs, trainloader, testloader=None, start_steps=10, max_steps=64):
+    def train_agent(self, epochs, trainloader, testloader=None, start_steps=4, max_steps=64):
         self.train()
         for epoch in range(epochs):
             # Max Step schedule -----------------------------------------------------
@@ -258,7 +264,9 @@ class GlimpseAgent(nn.Module):
 
                 total_policy_loss, total_value_loss, total_classification_loss, total = 0.0, 0.0, 0.0, 0.0
                 for imgs, targets in trainloader:
-                    imgs, targets = imgs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                    
+                    total += 1
+                    imgs, targets = imgs.to(self.device), targets.to(self.device)
 
                     logits, logps, advantages, returns, values, entropies = self.forward(imgs, targets, max_steps=steps)
 
@@ -277,25 +285,28 @@ class GlimpseAgent(nn.Module):
                     total_value_loss += value_loss.item()
 
                     #  Back‑prop RL branch first ---------------------------------------
-                    self.value_optimizer.zero_grad()
+                    self.cricit_optimizer.zero_grad()
                     self.reinforce_optimizer.zero_grad()
                     rl_loss.backward(retain_graph=True)
                     value_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.value_head.parameters(), 5.0)
+                    torch.nn.utils.clip_grad_norm_(self.cricit.parameters(), 5.0)
                     torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 5.0)
                     self.reinforce_optimizer.step()
-                    self.value_optimizer.step()
+                    self.cricit_optimizer.step()
 
                     #  Back‑prop supervised branch --------------------------------------
                     self.classification_optimizer.zero_grad()
                     cls_loss.backward()
                     self.classification_optimizer.step()
+                    pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 
+                                  'Value Loss' : total_value_loss / total, 'Max Steps' : steps})
                     pbar.update(1)
-                    total += 1 
+                     
 
-                pbar.set_description(f'Train: {epoch + 1}')
                 pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 
                                   'Value Loss' : total_value_loss / total, 'Max Steps' : steps})
+                pbar.set_description(f'Train: {epoch + 1}')
+                
 
             if testloader is not None:
                 self.eval_agent(testloader, max_steps=max_steps)
@@ -305,12 +316,12 @@ class GlimpseAgent(nn.Module):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def eval_agent(self, testloader, max_steps = 32):
+    def eval_agent(self, testloader, max_steps=32):
         self.eval()
         total, correct, loss_sum, step_sum = 0, 0, 0.0, 0.0
-        with tqdm(total=len(testloader)) as pbar:
+        with tqdm(total=len(testloader), desc='Eval  ') as pbar:
             for imgs, targets in testloader:
-                imgs, targets = imgs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
+                imgs, targets = imgs.to(self.device), targets.to(self.device)
                 logits, steps = self.greedy_forward(imgs, max_steps=max_steps)
                 loss_sum += self.classification_criterion(logits, targets).item() * targets.size(0)
                 correct += (logits.argmax(dim=1) == targets).sum().item()
@@ -319,11 +330,12 @@ class GlimpseAgent(nn.Module):
                 acc = correct / max(total, 1)
                 avg_loss = loss_sum / max(total, 1)
                 avg_steps = step_sum / total
-                pbar.set_postfix({"Test Accuracy: " : acc,"Test Loss " : avg_loss, "Avg Steps" : avg_steps})
+                pbar.set_postfix({"Test Accuracy" : acc,"Test Loss" : avg_loss, "Avg Steps" : avg_steps})
                 pbar.update(1)
 
-            # acc = correct / max(total, 1)
-            # avg_loss = loss_sum / max(total, 1)
-            # avg_steps = step_sum / total
-            print(f"Test accuracy: {acc:.4f} | Test loss: {avg_loss:.4f} | N={total} | Avg Steps {avg_steps}")
+            acc = correct / max(total, 1)
+            avg_loss = loss_sum / max(total, 1)
+            avg_steps = step_sum / total
+            pbar.set_postfix({"Test Accuracy" : acc,"Test Loss" : avg_loss, "Avg Steps" : avg_steps})
+
         return acc, avg_loss
