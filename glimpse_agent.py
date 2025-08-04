@@ -4,8 +4,8 @@ import torch.nn.functional as F
 from torch.distributions import Categorical, Bernoulli
 from itertools import chain
 from math import sqrt
-from tqdm import tqdm
 from utils import make_glimpse_grid
+from plotter import plot_centers
 
 # -----------------------------------------------------------------------------
 #  Glimpse‑based agent with REINFORCE + entropy bonus + baseline
@@ -18,7 +18,7 @@ class GlimpseAgent(nn.Module):
     loop can compute the losses.
     """
 
-    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.0001, gamma = 0.96, image_size = 28, patch_size = 14, embd_dim = 256, device = None):
+    def __init__(self, policy, encoder, classifier, gate, step_cost = 0.000001, gamma = 0.96, image_size = 28, patch_size = 14, embd_dim = 128, device = None):
         super().__init__()
 
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,9 +40,9 @@ class GlimpseAgent(nn.Module):
         self.rnn = nn.LSTM(embd_dim, embd_dim, batch_first=True).to(self.device)
 
         #  value head  (decrease variance of REINFORCE)
-        self.cricit = nn.Sequential(nn.Linear(embd_dim, 128),
+        self.cricit = nn.Sequential(nn.Linear(embd_dim, 64),
                                     nn.ReLU(), 
-                                    nn.Linear(128, 1)).to(self.device)
+                                    nn.Linear(64, 1)).to(self.device)
 
         #  Small stability tweaks ------------------------------------------------
         if hasattr(self.gate, "gate"):
@@ -55,7 +55,7 @@ class GlimpseAgent(nn.Module):
 
         #  Hyper‑params ----------------------------------------------------------
         self.attn_tau = 0.5  # temperature for soft attention
-        self.entropy_weight = 1e-2  # encourage exploration
+        self.entropy_weight = 1e-1  # encourage exploration
 
         #  Optimisers ------------------------------------------------------------
         self.classification_criterion = nn.CrossEntropyLoss()
@@ -69,8 +69,8 @@ class GlimpseAgent(nn.Module):
             ),
             lr=1e-3,
         )
-        self.reinforce_optimizer = torch.optim.Adam(self.policy.parameters(), lr=1e-4)
-        self.cricit_optimizer = torch.optim.Adam(self.cricit.parameters(), lr=5e-4)
+        self.reinforce_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4)
+        self.cricit_optimizer = torch.optim.Adam(self.cricit.parameters(), lr=1e-3)
 
     def _retina_step(self, x, center):
         """Extract pxp patch around center (in [-1,1] coords)."""
@@ -125,7 +125,7 @@ class GlimpseAgent(nn.Module):
     #  Forward rollout
     # ---------------------------------------------------------------------
 
-    def forward(self, x, targets = None, max_steps = 8):
+    def forward(self, x, targets = None, max_steps = 8, min_steps = 3):
         """Run an episode.
 
         Returns
@@ -158,9 +158,8 @@ class GlimpseAgent(nn.Module):
             entropies.append(act_dist.entropy() + stop_dist.entropy())
 
             patch = self._retina_step(x, self._idx_to_coord(idx))
-            feat_t = self.encoder(patch).view(B, -1)
+            feat_t = self.encoder(patch, self._idx_to_coord(idx)).view(B, -1)
             
-
             h_t, c_t = self.memory(feat_t, (h_t, c_t))
             baseline_t = self.cricit(h_t.detach()).squeeze(-1)
             prev_ctx = h_t.detach()  # next‑step policy context
@@ -177,6 +176,7 @@ class GlimpseAgent(nn.Module):
                 with torch.no_grad():
                     logits = self._forward_seq(seq_feats) # next-step reward context
                     step_reward = self._confidence_reward(logits, prev_logits, targets) - self.step_cost
+                    prev_logits = logits.detach()
                     rewards.append(step_reward)
 
             if stop.bool().all():
@@ -188,14 +188,15 @@ class GlimpseAgent(nn.Module):
         # final reward: 1 if prediction correct else 0 ----------------------
         if targets is not None:
             preds = logits.argmax(dim=1)
-            final_r = -1.0 if not (preds == targets).bool() else 1.0  # [B]
+            final_r = -5.0 if not (preds == targets).bool() else 5.0  # [B]
             rewards[-1] += final_r  # last reward
         else:
             # Evaluation mode... no RL signal
             rewards = [torch.zeros(B, device=device)] * len(seq_feats)
 
         returns = self._discounted(rewards, self.gamma)  # [T,B]
-        advantages = returns.detach() - torch.stack(values)
+        advantages = returns - torch.stack(values).detach()
+        # advantages = (advantages - advantages.mean()) / (advantages.std().clamp_min(1e-8))
 
         # stack lists
         values = torch.stack(values)        # [T,B]
@@ -206,7 +207,7 @@ class GlimpseAgent(nn.Module):
     
     
     @torch.no_grad()
-    def greedy_forward(self, x, max_steps=32):
+    def greedy_forward(self, x, max_steps=32, min_steps=3):
         """Run a greedy episode.
 
         Returns
@@ -221,7 +222,7 @@ class GlimpseAgent(nn.Module):
         c_t = x.new_zeros(B, self.memory.hidden_size)
         prev_ctx = h_t
 
-        seq_feats = []
+        seq_feats, centers, patches = [], [], []
         steps = 0
 
         for t in range(max_steps):
@@ -234,7 +235,10 @@ class GlimpseAgent(nn.Module):
 
 
             patch = self._retina_step(x, self._idx_to_coord(idx))
-            feat_t = self.encoder(patch).view(B, -1)
+            feat_t = self.encoder(patch, self._idx_to_coord(idx)).view(B, -1)
+
+            centers.append(self._idx_to_coord(idx)[0])
+            patches.append(patch)
 
             h_t, c_t = self.memory(feat_t, (h_t, c_t))
             prev_ctx = h_t  # next‑step policy context
@@ -248,66 +252,58 @@ class GlimpseAgent(nn.Module):
         # final class prediction 
         logits = self._forward_seq(seq_feats)
 
-        return logits, steps
+        return logits, centers, patches, steps
     
 
     # ------------------------------------------------------------------
     #  Training helpers
     # ------------------------------------------------------------------
 
-    def train_agent(self, epochs, trainloader, testloader=None, start_steps=4, max_steps=64):
+    def train_agent(self, epochs, trainloader, testloader=None, start_steps=10, max_steps=64):
         self.train()
         for epoch in range(epochs):
             # Max Step schedule -----------------------------------------------------
             steps = min((start_steps + (2 * epoch)), max_steps)
-            with tqdm(total=len(trainloader), desc=f"Train: {epoch}", postfix={'Policy Loss' : 0, 'Classification Loss' : 0, 'Value Loss' : 0, 'Max Steps' : steps}) as pbar:
-
-                total_policy_loss, total_value_loss, total_classification_loss, total = 0.0, 0.0, 0.0, 0.0
-                for imgs, targets in trainloader:
-                    
-                    total += 1
-                    imgs, targets = imgs.to(self.device), targets.to(self.device)
-
-                    logits, logps, advantages, returns, values, entropies = self.forward(imgs, targets, max_steps=steps)
-
-                    # Supervised loss --------------------------------------------------
-                    cls_loss = self.classification_criterion(logits, targets)
-                    total_classification_loss += cls_loss.item()
-
-                    # Policy loss ------------------------------------------------------
-                    policy_loss = -(logps * advantages.detach()).mean()
-                    entropy_loss = -(self.entropy_weight * entropies.mean())
-                    rl_loss = policy_loss + entropy_loss
-                    total_policy_loss += rl_loss.item()
-
-                    # Value loss -------------------------------------------------------
-                    value_loss = 0.5 * (values - returns.detach()).pow(2).mean()
-                    total_value_loss += value_loss.item()
-
-                    #  Back‑prop RL branch first ---------------------------------------
-                    self.cricit_optimizer.zero_grad()
-                    self.reinforce_optimizer.zero_grad()
-                    rl_loss.backward(retain_graph=True)
-                    value_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.cricit.parameters(), 5.0)
-                    torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 5.0)
-                    self.reinforce_optimizer.step()
-                    self.cricit_optimizer.step()
-
-                    #  Back‑prop supervised branch --------------------------------------
-                    self.classification_optimizer.zero_grad()
-                    cls_loss.backward()
-                    self.classification_optimizer.step()
-                    pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 
-                                  'Value Loss' : total_value_loss / total, 'Max Steps' : steps})
-                    pbar.update(1)
-                     
-
-                pbar.set_postfix({'Policy Loss' : total_policy_loss / total, 'Classification Loss' : total_classification_loss / total, 
-                                  'Value Loss' : total_value_loss / total, 'Max Steps' : steps})
-                pbar.set_description(f'Train: {epoch + 1}')
+            total_policy_loss, total_value_loss, total_classification_loss, total_returns, total = 0.0, 0.0, 0.0, 0.0, 0.0
+            for imgs, targets in trainloader:
                 
+                total += 1
+                imgs, targets = imgs.to(self.device), targets.to(self.device)
 
+                logits, logps, advantages, returns, values, entropies = self.forward(imgs, targets, max_steps=steps)
+
+                total_returns += returns.mean(dim=0).flatten().item()
+                # Supervised loss --------------------------------------------------
+                cls_loss = self.classification_criterion(logits, targets)
+                total_classification_loss += cls_loss.item()
+
+                # Policy loss ------------------------------------------------------
+                policy_loss = -(logps * advantages.detach()).mean()
+                entropy_loss = -(self.entropy_weight * entropies.mean())
+                rl_loss = policy_loss + entropy_loss
+                total_policy_loss += rl_loss.item()
+
+                # Value loss -------------------------------------------------------
+                value_loss = 0.5 * (values - returns.detach()).pow(2).mean()
+                total_value_loss += value_loss.item()
+
+                #  Back‑prop RL branch first ---------------------------------------
+                self.cricit_optimizer.zero_grad()
+                self.reinforce_optimizer.zero_grad()
+                rl_loss.backward(retain_graph=True)
+                value_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.cricit.parameters(), 5.0)
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 5.0)
+                self.reinforce_optimizer.step()
+                self.cricit_optimizer.step()
+
+                #  Back‑prop supervised branch --------------------------------------
+                self.classification_optimizer.zero_grad()
+                cls_loss.backward()
+                self.classification_optimizer.step()
+               
+            print(f'Epoch {epoch + 1} | Policy Loss : {total_policy_loss / total} | Classification Loss : {total_classification_loss / total} | Value Loss : {total_value_loss / total} | Max Steps : {steps} | Avg Reward : {total_returns / total}')
+        
             if testloader is not None:
                 self.eval_agent(testloader, max_steps=max_steps)
 
@@ -319,23 +315,29 @@ class GlimpseAgent(nn.Module):
     def eval_agent(self, testloader, max_steps=32):
         self.eval()
         total, correct, loss_sum, step_sum = 0, 0, 0.0, 0.0
-        with tqdm(total=len(testloader), desc='Eval  ') as pbar:
-            for imgs, targets in testloader:
-                imgs, targets = imgs.to(self.device), targets.to(self.device)
-                logits, steps = self.greedy_forward(imgs, max_steps=max_steps)
-                loss_sum += self.classification_criterion(logits, targets).item() * targets.size(0)
-                correct += (logits.argmax(dim=1) == targets).sum().item()
-                step_sum += steps
-                total += targets.size(0)
-                acc = correct / max(total, 1)
-                avg_loss = loss_sum / max(total, 1)
-                avg_steps = step_sum / total
-                pbar.set_postfix({"Test Accuracy" : acc,"Test Loss" : avg_loss, "Avg Steps" : avg_steps})
-                pbar.update(1)
+        
+        for imgs, targets in testloader:
+            imgs, targets = imgs.to(self.device), targets.to(self.device)
+            logits, _, _, steps = self.greedy_forward(imgs, max_steps=max_steps)
+            loss_sum += self.classification_criterion(logits, targets).item() * targets.size(0)
+            correct += (logits.argmax(dim=1) == targets).sum().item()
+            step_sum += steps
+            total += targets.size(0)
 
-            acc = correct / max(total, 1)
-            avg_loss = loss_sum / max(total, 1)
-            avg_steps = step_sum / total
-            pbar.set_postfix({"Test Accuracy" : acc,"Test Loss" : avg_loss, "Avg Steps" : avg_steps})
-
+        acc = correct / max(total, 1)
+        avg_loss = loss_sum / max(total, 1)
+        avg_steps = step_sum / max(total, 1)
+        
+        print(f'Test Accuracy : {acc} | Test Loss : {avg_loss} | Avg Steps : {avg_steps}')
         return acc, avg_loss
+    
+    @torch.no_grad()
+    def viz_glimpses(self, x, max_steps=32):
+        """displays what the agent is seeing per time step"""
+        x = x.to(self.device)
+        logits, centers, patches, steps = self.greedy_forward(x, max_steps=max_steps)
+
+        plot_centers(x.squeeze(0).detach().cpu().numpy(), centers)
+
+        
+
