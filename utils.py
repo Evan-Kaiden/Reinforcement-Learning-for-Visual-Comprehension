@@ -2,6 +2,7 @@ import torch
 
 
 def map_scale(val, img_size):
+    """Maps from range [-1, 1] to range [0, img_size]"""
     val = ((val + 1) / 2) * img_size
     return val
 
