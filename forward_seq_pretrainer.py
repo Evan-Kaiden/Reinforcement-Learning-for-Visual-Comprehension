@@ -10,25 +10,32 @@ class preTrainer(nn.Module):
         super().__init__()
 
         self.device = device
-        self.S = img_size
+
+        # Action Space Sampling Parameters -----------------------
         self.in_channels = in_channels
+        self.S = img_size
         self.p = patch_size
         self.stride = stride
-        self.attn_tau = 0.5
 
+        self.attn_tau = 0.5
+        
+        # Models -------------------------------------------------
         self.encoder = encoder.to(device)
         self.classifier = classifier.to(device)
         self.gate = gate.to(device)
         self.seq_summarizer = seq_summarizer.to(device)
 
-        self.lr = lr
+
+        # Optimisers ----------------------------------------------
         self.optimizer = optim.Adam(chain(self.encoder.parameters(),
                                           self.classifier.parameters(),
                                           self.gate.parameters(),
-                                          self.seq_summarizer.parameters()), lr=self.lr)
-        self.criterion = nn.CrossEntropyLoss()
+                                          self.seq_summarizer.parameters()),
+                                        lr=lr,
+                                        )
+        self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-        # generate location values for encoder
+        # Generate A Constant Sampling Spcae ------------------------
         self._create_centers(self.S, self.p, self.stride)
 
     def _create_centers(self, img_size, patch_size, stride):
@@ -44,10 +51,11 @@ class preTrainer(nn.Module):
         self.centers = torch.stack((norm_x, norm_y), dim=-1).to(self.device)
 
     def get_patches(self, x):
-        """gets all patches of an image given a patch size and a stride"""
-        B = x.size(0)
-        patches = F.unfold(x, self.p, self.stride).permute(0, 2, 1).reshape(-1, self.in_channels, self.p, self.p)
-        T = patches.size(0) // B
+        """Return all patches of an image given a patch size and a stride"""
+        B       = x.size(0)
+        patches = F.unfold(x, kernel_size=self.p, stride=self.stride).permute(0, 2, 1).reshape(-1, self.in_channels, self.p, self.p)
+        T       = patches.size(0) // B
+
         return patches.contiguous(), T
     
     def forward(self, x):
@@ -56,23 +64,23 @@ class preTrainer(nn.Module):
         # Get Patches and Centers -----------------------------------------
         patches, T = self.get_patches(x)
 
-        centers = self.centers.reshape(-1, 2)
-        centers = centers.repeat(B, 1)
+        centers    = self.centers.reshape(-1, 2)
+        centers    = centers.repeat(B, 1)
 
         # Encoder Output --------------------------------------------------
-        seq_input = self.encoder(patches, centers)  # [B*T, D]
-        seq_input = seq_input.view(B, T, -1)     # [B, T, D]
+        seq_input = self.encoder(patches, centers)              #  [B*T, D]
+        seq_input = seq_input.view(B, T, -1)                    # [B, T, D]
 
         # RNN Output ------------------------------------------------------
-        seq_summarizer_out, _ = self.seq_summarizer(seq_input)  # [B,T,D]
+        seq_summarizer_out, _ = self.seq_summarizer(seq_input)    # [B,T,D]
 
         # Attention -------------------------------------------------------
-        scores = self.gate(seq_summarizer_out)           # [B,T,1]
+        scores = self.gate(seq_summarizer_out)                    # [B,T,1]
         alpha = torch.softmax(scores / self.attn_tau, dim=1)
-        pooled = (seq_summarizer_out * alpha).sum(dim=1)  # [B,D]
+        pooled = (seq_summarizer_out * alpha).sum(dim=1)           #  [B,D]
 
         # Class Prediction ------------------------------------------------
-        logits = self.classifier(pooled)       # [B,n_classes]
+        logits = self.classifier(pooled)                    # [B,n_classes]
 
         return logits
     
@@ -90,7 +98,7 @@ class preTrainer(nn.Module):
                 cls_loss = self.criterion(logits, targets)
                 total_classification_loss += cls_loss.item()
 
-                #  Back‑prop -------------------------------------------------------
+                # Back‑prop --------------------------------------------------------
                 self.optimizer.zero_grad()
                 cls_loss.backward()
                 self.optimizer.step()
@@ -99,7 +107,7 @@ class preTrainer(nn.Module):
                
             print(f'Epoch {epoch + 1} |  Classification Loss : {total_classification_loss / total}')
 
-            if testloader is not None:
+            if testloader is not None and (epoch + 1) % 5 == 0:
                 self.test(testloader)
                 
     @torch.no_grad()
