@@ -37,7 +37,7 @@ class GlimpseAgent(nn.Module):
         self.memory     = context_memory.to(self.device)
         self.rnn        = seq_summarizer.to(self.device)
         #  value head
-        self.cricit     = nn.Sequential(nn.Linear(embd_dim, 64),
+        self.value_head = nn.Sequential(nn.Linear(embd_dim, 64),
                                         nn.ReLU(), 
                                         nn.Linear(64, 1)).to(self.device)
 
@@ -60,8 +60,8 @@ class GlimpseAgent(nn.Module):
                 lr=3e-5
                )  
         
-        self.reinforce_optimizer = torch.optim.Adam(chain(self.policy.parameters(), self.memory.parameters()), lr=3e-4)
-        self.cricit_optimizer    = torch.optim.Adam(self.cricit.parameters(), lr=1e-3)
+        self.reinforce_optimizer  = torch.optim.Adam(chain(self.policy.parameters(), self.memory.parameters()), lr=3e-4)
+        self.value_head_optimizer = torch.optim.Adam(self.value_head.parameters(), lr=1e-3)
 
     def _retina_step(self, x, center):
         """Extract pxp patch around center (in [-1,1] coords)"""
@@ -130,7 +130,7 @@ class GlimpseAgent(nn.Module):
         advantages: [T, B]  normalized advantages per step
         returns:    [T,B]   discounted rewards
         entropies:  [T,B]   step-wise entropy 
-        values :    [T,B]   critic baseline per step
+        values :    [T,B]   value baseline per step
         """
         B, _, _, _ = x.shape
         device     = x.device
@@ -166,8 +166,8 @@ class GlimpseAgent(nn.Module):
             h_t, c_t = self.memory((feat_t, (h_t, c_t)))
             prev_ctx = h_t
 
-            # critic baseline for variance reduction
-            baseline_t = self.cricit(h_t.detach()).squeeze(-1)
+            # value baseline for variance reduction
+            baseline_t = self.value_head(h_t.detach()).squeeze(-1)
 
             values.append(baseline_t)
             seq_feats.append(feat_t.unsqueeze(1))
@@ -341,16 +341,16 @@ class GlimpseAgent(nn.Module):
                 total_value_loss += value_loss.item()
 
                 # ---------- Back‑prop RL branch ----------
-                self.cricit_optimizer.zero_grad()
+                self.value_head_optimizer.zero_grad()
                 self.reinforce_optimizer.zero_grad()
                 rl_loss.backward(retain_graph=True)
                 value_loss.backward()
 
                 # Clip Gradients For Stability
-                torch.nn.utils.clip_grad_norm_(self.cricit.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.value_head.parameters(), 1.0)
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
                 self.reinforce_optimizer.step()
-                self.cricit_optimizer.step()
+                self.value_head_optimizer.step()
 
                 # ---------- Back‑prop supervised branch ----------
                 self.classification_optimizer.zero_grad()
