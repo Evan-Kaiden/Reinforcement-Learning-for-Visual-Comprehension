@@ -2,17 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchvision import models
+
+
 class PerceptionPolicy(nn.Module):
     def __init__(self, action_space, embd_dim):
         super().__init__()
         self.action_space = action_space
 
-        self.fc1 = nn.Linear(embd_dim, 256)
-        self.dist_head = nn.Linear(256, action_space)
-        self.stop_head = nn.Linear(256, 1)
-        
+        self.fc1 = nn.Linear(embd_dim + 2, 64)
+        self.dist_head = nn.Linear(64, action_space)
+
+        nn.init.zeros_(self.fc1.weight[:, -2:]) 
+        nn.init.zeros_(self.fc1.bias)
     
-    def forward(self, current_context):
+    def forward(self, current_context, loc):
         """
         Inputs:
             current_context: [B, embd_D] -- context for current step
@@ -20,27 +24,33 @@ class PerceptionPolicy(nn.Module):
             dist: [B, Action Space]
             stop_logits: [B, 1]
         """
-        x = F.relu(self.fc1(current_context))      
-
+        x = torch.cat([current_context, loc], dim=1)
+        x = F.relu(self.fc1(x))      
 
         logits = self.dist_head(x)
-        stop_logits = self.stop_head(x)
-
-        return logits, stop_logits
+        return logits
         
 
-    
 class PerceptionEncoder(nn.Module):
-    def __init__(self, in_channels, input_shape, embd_dim):
+    def __init__(self, in_channels, embd_dim):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3), nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, 3),   nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1)  # -> [B,64,1,1]
+            nn.Conv2d(in_channels, 64, 3, padding=1),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, 3, padding=1, stride=2),
+            nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, 3, padding=1),
+            nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1)
         )
-        self.proj = nn.Linear(64, embd_dim)
+        self.location_encoder = nn.Linear(2, 256)
+        self.proj = nn.Sequential(
+            nn.Linear(256, 512),
+            nn.BatchNorm1d(512), nn.ReLU(inplace=True),
+            nn.Linear(512, embd_dim)
+        )
 
-    def forward(self, img_patch):
+    def forward(self, img_patch, loc):
         """
         Inputs:
             img_patch: [B, C, H, W]
@@ -49,6 +59,10 @@ class PerceptionEncoder(nn.Module):
         """
         x = self.encoder(img_patch)
         x = x.view(x.size(0), -1) 
+
+        loc = self.location_encoder(loc) 
+        x = x + loc # add patch location information
+
         encoding = self.proj(x)
 
         return encoding
@@ -70,37 +84,57 @@ class gate(nn.Module):
         """
         return self.gate(embedding)
     
+class SequenceSummarizer(nn.Module):
+    def __init__(self, embd_dim):
+        super().__init__()
+        self.hidden_size = embd_dim
+        self.lstm = nn.LSTM(embd_dim, embd_dim, batch_first=True, num_layers=3, dropout=0.2)
 
+    def forward(self, x):
+        """
+        Inputs: 
+            x : [B, T, embd_D] full sequence of events 
+        Returns:
+            out : [B, T, embd_D] output of sequence of events
+        """
+        return self.lstm(x)
+    
 
 class ContextMemory(nn.Module):
-    def __init__(self, embd_dim, n_layers=1):
+    def __init__(self, embd_dim):
         super().__init__()
         self.embd_dim = embd_dim
-        self.rnn = nn.LSTM(input_size=embd_dim, hidden_size=embd_dim, num_layers=n_layers, batch_first=True)
+        self.hidden_size = embd_dim
+
+        self.lstm = nn.LSTMCell(embd_dim, embd_dim)
 
     def forward(self, current_context):
         """
         Inputs:
             current_context: [B, T, embd_D] -- 1 timestep input
             prev_state: tuple (h, c), T = 1
-            - h: [B, T, embd_dim]
-            - c: [B, T, embd_dim]
+                h: [B, T, embd_dim]
+                c: [B, T, embd_dim]
         Returns:
-            - output: [B, T, embd_dim]
-            - next_state: (h, c)
+            output: [B, T, embd_dim]
+            next_state: (h, c)
         """
-        output, next_state = self.rnn(current_context)
-        return output.squeeze(0), next_state  
+        return self.lstm(*current_context)
 
 class Classifier(nn.Module):
     def __init__(self, embd_dim, n_classes):
         super().__init__()
-        self.fc1 = nn.Linear(embd_dim, n_classes)
+        self.fc1 = nn.Linear(embd_dim, 64)
+        self.fc2 = nn.Linear(64, 128)
+        self.final = nn.Linear(128, n_classes)
     
     def forward(self, embeding):
         """
-        embedding: [B, embd_dim]
+        Inputs:
+            embedding: [B, embd_dim]
         Returns:
-        - output: [B, n_classes]
+            output: [B, n_classes]
         """
-        return self.fc1(embeding)
+        x = F.relu(self.fc1(embeding))
+        x = F.relu(self.fc2(x))
+        return self.final(x)
