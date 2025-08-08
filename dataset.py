@@ -1,10 +1,20 @@
+from torch.utils.data import DataLoader
 from torchvision import datasets as dsets, transforms
-from torch.utils.data import DataLoader, Subset
-import torch
 
-train_data = dsets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
-test_data = dsets.MNIST(root='./data', train=False, download=True, transform=transforms.ToTensor())
+train_tf = transforms.Compose([
+    # transforms.RandomAffine(degrees=20, translate=(0.2, 0.2), scale=(0.7, 1.3)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.243, 0.261])
+])
 
-# Note: batch_size=1 is fine for episode-based training, but can be increased
-trainloader = DataLoader(train_data, batch_size=1, shuffle=True)
-testloader = DataLoader(test_data, batch_size=1, shuffle=False)
+test_tf = transforms.Compose([
+    # transforms.RandomAffine(degrees=20, translate=(0.2, 0.2), scale=(0.7, 1.3)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.243, 0.261])
+])
+
+train_data = dsets.CIFAR10(root='./data', train=True, download=True, transform=train_tf)
+test_data = dsets.CIFAR10(root='./data', train=False, download=True, transform=test_tf)
+
+trainloader = DataLoader(train_data, batch_size=32, shuffle=True)
+testloader = DataLoader(test_data, batch_size=32, shuffle=False)
