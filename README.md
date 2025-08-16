@@ -48,7 +48,7 @@ This policy is trained using REINFORCE with a baseline to improve learning stabi
 
 
 # Experiments
-The following commands show how to replicate a few experiments
+The following commands show how to run a few experiments
 
 ```bash
 python main.py --pretrain True --patch_size 8 --steps 6 --img_size 64 --clutter_count 4 --stride 4
@@ -61,8 +61,6 @@ This will run on cluttered MNIST with the above parameters. The vision sequence 
 
 | ![](gifs/gifs_experiment1/attention4.gif) | ![](gifs/gifs_experiment1/attention5.gif) | ![](gifs/gifs_experiment1/attention6.gif) |
 |--------------------------------------|--------------------------------------|--------------------------------------|
-
-![Demo](gifs/gifs_experiment1/attention4.gif)
 
 ```bash
 python main.py --pretrain True --patch_size 3 --steps 8 --img_size 28 --clutter_count 0 --stride 3
