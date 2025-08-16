@@ -3,11 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Bernoulli
 
-from math import sqrt
+import os
 from itertools import chain
 
 from utils import make_glimpse_grid, entropy_weight_t
-from plotter import plot_centers, plot_attentions
+from plotter import plot_centers, plot_attentions, make_gif
 
 # -----------------------------------------------------------------------------
 #  Glimpse‑based agent with REINFORCE + entropy bonus + baseline
@@ -47,7 +47,7 @@ class GlimpseAgent(nn.Module):
         self.entropy_weight = init_entropy_weight  # encourage exploration
         self.init_entropy   = init_entropy_weight
 
-        #  Optimisers ------------------------------------------------------------
+        # Optimisers --------------------------------------------------------------
         self.classification_criterion = nn.CrossEntropyLoss()
         self.classification_optimizer = torch.optim.Adam(
             chain(
@@ -57,11 +57,14 @@ class GlimpseAgent(nn.Module):
                    self.rnn.parameters(),
                    #self.memory.parameters(),
                 ),
-                lr=3e-5
+                lr=1e-4
                )  
         
         self.reinforce_optimizer  = torch.optim.Adam(chain(self.policy.parameters(), self.memory.parameters()), lr=3e-4)
         self.value_head_optimizer = torch.optim.Adam(self.value_head.parameters(), lr=1e-3)
+
+        # Track For Model Checkpoints -----------------------------------------------
+        self.best_acc = 0.0
 
     def _retina_step(self, x, center):
         """Extract pxp patch around center (in [-1,1] coords)"""
@@ -312,6 +315,7 @@ class GlimpseAgent(nn.Module):
     def train_agent(self, epochs, trainloader, testloader=None, steps=6):
         self.train()
         for epoch in range(epochs):
+            
             # ---------- Entropy schedule ----------
             self.entropy_weight = max(0.01, entropy_weight_t(epoch, epochs, self.init_entropy))
 
@@ -360,11 +364,18 @@ class GlimpseAgent(nn.Module):
             print(f'Epoch {epoch + 1} | Policy Loss : {total_policy_loss / total} | Classification Loss : {total_classification_loss / total} | Value Loss : {total_value_loss / total} | Max Steps : {steps} | Avg Reward : {total_returns / total} | Entropy Weight {self.entropy_weight}')
 
             if testloader is not None:
-                self.eval_agent(testloader, max_steps=steps)
-                # Visualize 10 Examples 
-                for i in range(10):
-                    self.viz_glimpses(next(iter(trainloader))[0][2:3, :], epoch=epoch + 1, idx=i, max_steps=steps)
-
+                acc, _ = self.eval_agent(testloader, max_steps=steps)
+                if acc > self.best_acc:
+                    self.best_acc = acc
+                    self.save_models("agent_ckpt")
+                    print("Saving Checkpoint...")
+                # Visualize 10 Examples Every 10 epochs
+                if (epoch + 1) % 10 == 0:
+                    for i in range(10):
+                        self.viz_glimpses(next(iter(trainloader))[0][2:3, :], epoch=epoch + 1, idx=i, max_steps=steps)
+                
+                self.train()
+                
     # ------------------------------------------------------------------
     #  Evaluation
     # ------------------------------------------------------------------
@@ -391,8 +402,51 @@ class GlimpseAgent(nn.Module):
     @torch.no_grad()
     def viz_glimpses(self, x, epoch, idx, max_steps=6):
         """Save Visuals of Agents Vision Path and Action Probabilities"""
+        self.eval()
         x = x.to(self.device)
         _, centers, _, dists = self.greedy_forward(x, steps=max_steps)
 
         plot_centers(x.squeeze(0).detach().cpu(), epoch, idx, centers)
         plot_attentions(dists, epoch, idx, self.action_space)
+    
+    @torch.no_grad()
+    def make_viz(self, x, max_steps=6, filepath=None):
+        self.eval()
+        x = x.to(self.device)
+        _, centers, _, _ = self.greedy_forward(x, steps=max_steps)
+
+        if filepath is not None:
+            make_gif(x.squeeze(0).detach().cpu(), centers, self.p, filepath)
+        else:
+            make_gif(x.squeeze(0).detach().cpu(), centers, self.p)
+
+    def save_models(self, save_dir):
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        torch.save(self.encoder.state_dict(), os.path.join(save_dir, 'encoder.pth'))
+        torch.save(self.classifier.state_dict(), os.path.join(save_dir, 'classifier.pth'))
+        torch.save(self.policy.state_dict(), os.path.join(save_dir, 'policy.pth'))
+        torch.save(self.memory.state_dict(), os.path.join(save_dir, 'memory.pth'))
+        torch.save(self.rnn.state_dict(), os.path.join(save_dir, 'rnn.pth'))
+        torch.save(self.value_head.state_dict(), os.path.join(save_dir, 'value_head.pth'))
+    
+    def set_models(self, save_dir=None):
+        models = {
+            "encoder.pth" : self.encoder, 
+            "classifier.pth" : self.classifier, 
+            "gate.pth" : self.gate, 
+            "rnn.pth" : self.rnn,
+            "memory.pth" : self.memory,
+            "value_head.pth" : self.value_head,
+            "policy.pth" : self.policy
+            }
+        
+        if save_dir is not None:
+            assert os.path.exists(save_dir), "Directory does not exist"
+            for path, model in models.items():
+                if not os.path.exists(os.path.join(save_dir, path)):
+                    print(f"Model {path} does not exist using current model")
+                else:
+                    state_dict = torch.load(os.path.join(save_dir, path), map_location=self.device)
+                    model.load_state_dict(state_dict)

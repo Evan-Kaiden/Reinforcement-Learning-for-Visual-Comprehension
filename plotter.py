@@ -1,6 +1,9 @@
 import os
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import imageio.v2 as imageio
+from io import BytesIO
 import torch
 from utils import map_scale
 
@@ -9,11 +12,11 @@ def plot_centers(img, epoch, id, centers):
     plt.ioff() 
 
     # ----- For CIFAR-10 Denormalization -----
-    MEAN = torch.tensor([0.4914, 0.4822, 0.4465])
-    STD  = torch.tensor([0.2470, 0.2435, 0.2616])
+    # MEAN = torch.tensor([0.4914, 0.4822, 0.4465])
+    # STD  = torch.tensor([0.2470, 0.2435, 0.2616])
 
-    img = torch.clamp(img * MEAN[:, None, None] + STD[:, None, None], 0.0, 1.0)
-    img = img.numpy()
+    # img = torch.clamp(img * MEAN[:, None, None] + STD[:, None, None], 0.0, 1.0)
+    
 
     # ----------------------------------------
     out_dir = os.path.join('plots', f'epoch{epoch}')
@@ -22,7 +25,7 @@ def plot_centers(img, epoch, id, centers):
 
     x, y = [c[0] for c in centers], [c[1] for c in centers]
 
-    
+    img = img.numpy()
     if img.shape[1] == img.shape[2]:
         img = img.transpose(1,2,0)
 
@@ -95,3 +98,45 @@ def plot_attentions(distributions, epoch, id, action_space, cmap='inferno'):
         fig.savefig(save_path)
 
         plt.close()
+
+def make_gif(img, centers, patch_size, filename="attention.gif", fps=2):
+    out_dir = os.path.join('gifs')
+    if not os.path.exists(out_dir):
+        os.mkdir(out_dir)
+
+    x, y = [c[0] for c in centers], [c[1] for c in centers]
+
+    img = img.numpy()
+    if img.shape[1] == img.shape[2]:
+        img = img.transpose(1,2,0)
+
+    H, _, _ = img.shape
+
+    # ----- Scale check ([-1, 1] --> [H, W]) -----
+    if max(x) <= 1 and min(x) >= -1:
+        x, y = [map_scale(x_val.item(), H) for x_val in x], [map_scale(y_val.item(), H) for y_val in y]
+
+    frames = []
+    for i in range(len(x)):
+        fig, ax = plt.subplots()
+        ax.axis('off')
+        ax.imshow(img)
+
+        x_corner = x[i] - (patch_size / 2)
+        y_corner = y[i] - (patch_size / 2)
+        box = patches.Rectangle((x_corner, y_corner), patch_size, patch_size, linewidth=1, edgecolor='r', facecolor='none')
+
+        ax.add_patch(box)
+        ax.plot(x[i], y[i], 'o', color='red', markersize=5, label='Center')
+
+
+        buf = BytesIO()
+        plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+        plt.close(fig)
+        buf.seek(0)
+        frames.append(imageio.imread(buf))
+        buf.close()
+
+    gif_path = os.path.join(out_dir, filename)
+    imageio.mimsave(gif_path, frames, fps=fps, loop=0)
+    print(f"GIF saved to {gif_path}")

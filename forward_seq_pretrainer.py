@@ -13,16 +13,15 @@ class preTrainer(nn.Module):
 
         # Action Space Sampling Parameters -----------------------
         self.in_channels = in_channels
-        self.S = img_size
-        self.p = patch_size
-        self.stride = stride
-
-        self.attn_tau = 0.5
+        self.S           = img_size
+        self.p           = patch_size
+        self.stride      = stride
+        self.attn_tau    = 0.5
         
         # Models -------------------------------------------------
-        self.encoder = encoder.to(device)
-        self.classifier = classifier.to(device)
-        self.gate = gate.to(device)
+        self.encoder        = encoder.to(device)
+        self.classifier     = classifier.to(device)
+        self.gate           = gate.to(device)
         self.seq_summarizer = seq_summarizer.to(device)
 
 
@@ -37,6 +36,9 @@ class preTrainer(nn.Module):
 
         # Generate A Constant Sampling Spcae ------------------------
         self._create_centers(self.S, self.p, self.stride)
+
+        # Track For Model Check Points ------------------------------
+        self.best_acc = 0.0
 
     def _create_centers(self, img_size, patch_size, stride):
         """creates a matrix x,y values normalized to range [-1, 1]"""
@@ -63,10 +65,9 @@ class preTrainer(nn.Module):
 
         # Get Patches and Centers -----------------------------------------
         patches, T = self.get_patches(x)
-
         centers    = self.centers.reshape(-1, 2)
         centers    = centers.repeat(B, 1)
-
+        
         # Encoder Output --------------------------------------------------
         seq_input = self.encoder(patches, centers)              #  [B*T, D]
         seq_input = seq_input.view(B, T, -1)                    # [B, T, D]
@@ -86,6 +87,10 @@ class preTrainer(nn.Module):
     
     def train_models(self, epochs, trainloader, testloader=None):
         self.train()
+
+        # Learning Rate Scaler -----------------------------------------------------
+        lr_schedule = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs)
+        prev_save_epoch = 0
         for epoch in range(epochs):
             total_classification_loss, total = 0.0, 0.0
             
@@ -104,11 +109,28 @@ class preTrainer(nn.Module):
                 self.optimizer.step()
 
                 total += 1
+                
+            lr_schedule.step()
                
             print(f'Epoch {epoch + 1} |  Classification Loss : {total_classification_loss / total}')
 
             if testloader is not None and (epoch + 1) % 5 == 0:
-                self.test(testloader)
+                acc = self.test(testloader)
+                self.train()
+                if acc > self.best_acc:
+                    prev_save_epoch = epoch + 1
+                    self.best_acc = acc
+                    self.save_models('pretrainer_ckpt/')
+                    print("Saving Checkpoint...")
+
+        if prev_save_epoch < epochs:
+            acc = self.test(testloader)
+            if acc > self.best_acc:
+                    prev_save_epoch = epoch + 1
+                    self.best_acc = acc
+                    self.save_models('pretrainer_ckpt/')
+                    print("Saving Checkpoint...")
+        
                 
     @torch.no_grad()
     def test(self, testloader):
@@ -129,15 +151,29 @@ class preTrainer(nn.Module):
         
         print(f'Accuracy {correct / total} |  Classification Loss : {total_classification_loss / total}')
 
+        return correct / total
+
     def save_models(self, save_dir):
-        if os.path.exists(save_dir):
-            torch.save(self.encoder.state_dict(), save_dir+'encoder.pth')
-            torch.save(self.classifier.state_dict(), save_dir+'classifier.pth')
-            torch.save(self.gate.state_dict(), save_dir+'gate.pth')
-            torch.save(self.seq_summarizer.state_dict(), save_dir+'seq_summarizer.pth')
-        else:
+        if not os.path.exists(save_dir):
             os.mkdir(save_dir)
-            torch.save(self.encoder.state_dict(), save_dir+'encoder.pth')
-            torch.save(self.classifier.state_dict(), save_dir+'classifier.pth')
-            torch.save(self.gate.state_dict(), save_dir+'gate.pth')
-            torch.save(self.seq_summarizer.state_dict(), save_dir+'seq_summarizer.pth')
+
+        torch.save(self.encoder.state_dict(), os.path.join(save_dir, 'encoder.pth'))
+        torch.save(self.classifier.state_dict(), os.path.join(save_dir, 'classifier.pth'))
+        torch.save(self.gate.state_dict(), os.path.join(save_dir, 'gate.pth'))
+        torch.save(self.seq_summarizer.state_dict(), os.path.join(save_dir, 'seq_summarizer.pth'))
+    
+
+
+    def get_models(self, from_saved=True, save_dir=None):
+        models = {"encoder.pth" : self.encoder, "classifier.pth" : self.classifier, "gate.pth" : self.gate, "seq_summarizer.pth" : self.seq_summarizer}
+        if from_saved and save_dir is not None:
+            assert os.path.exists(save_dir), "Invalid Directory"
+            for path, model in models.items():
+                if not os.path.exists(os.path.join(save_dir, path)):
+                    print(f"Model {path} does not exist using current model")
+                else:
+                    state_dict = torch.load(os.path.join(save_dir, path), map_location=self.device)
+                    model.load_state_dict(state_dict)
+        
+        return self.encoder, self.classifier, self.gate, self.seq_summarizer
+

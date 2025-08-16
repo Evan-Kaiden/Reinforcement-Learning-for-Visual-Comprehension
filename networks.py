@@ -39,15 +39,15 @@ class PerceptionEncoder(nn.Module):
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.Conv2d(64, 128, 3, padding=1, stride=2),
             nn.BatchNorm2d(128), nn.ReLU(inplace=True),
-            nn.Conv2d(128, 256, 3, padding=1),
-            nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            # nn.Conv2d(128, 256, 3, padding=1),
+            # nn.BatchNorm2d(256), nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d(1)
         )
-        self.location_encoder = nn.Linear(2, 256)
+        self.location_encoder = nn.Linear(2, 128)
         self.proj = nn.Sequential(
-            nn.Linear(256, 512),
-            nn.BatchNorm1d(512), nn.ReLU(inplace=True),
-            nn.Linear(512, embd_dim)
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256), nn.ReLU(inplace=True),
+            nn.Linear(256, embd_dim)
         )
 
     def forward(self, img_patch, loc):
@@ -88,15 +88,18 @@ class SequenceSummarizer(nn.Module):
     def __init__(self, embd_dim):
         super().__init__()
         self.hidden_size = embd_dim
-        self.lstm = nn.LSTM(embd_dim, embd_dim, batch_first=True, num_layers=3, dropout=0.2)
-
+        self.lstm = nn.LSTM(embd_dim, embd_dim, num_layers=1, batch_first=True)
+        self.atn = nn.MultiheadAttention(embd_dim, num_heads=1, dropout=0.1, batch_first=True)
+        self.norm = nn.LayerNorm(embd_dim)
     def forward(self, x):
         """
         Inputs: 
             x : [B, T, embd_D] full sequence of events 
         Returns:
-            out : [B, T, embd_D] output of sequence of events
+            out : [B, T, embd_D] full sequence after LSTM
         """
+        atn_out, _ = self.atn(x, x, x)
+        x = F.relu(self.norm(atn_out + x))
         return self.lstm(x)
     
 
@@ -105,7 +108,6 @@ class ContextMemory(nn.Module):
         super().__init__()
         self.embd_dim = embd_dim
         self.hidden_size = embd_dim
-
         self.lstm = nn.LSTMCell(embd_dim, embd_dim)
 
     def forward(self, current_context):
@@ -124,9 +126,9 @@ class ContextMemory(nn.Module):
 class Classifier(nn.Module):
     def __init__(self, embd_dim, n_classes):
         super().__init__()
-        self.fc1 = nn.Linear(embd_dim, 64)
-        self.fc2 = nn.Linear(64, 128)
-        self.final = nn.Linear(128, n_classes)
+        self.fc1 = nn.Linear(embd_dim, n_classes)
+        # self.fc2 = nn.Linear(64, 128)
+        # self.final = nn.Linear(128, n_classes)
     
     def forward(self, embeding):
         """
@@ -135,6 +137,6 @@ class Classifier(nn.Module):
         Returns:
             output: [B, n_classes]
         """
-        x = F.relu(self.fc1(embeding))
-        x = F.relu(self.fc2(x))
-        return self.final(x)
+        # x = F.relu(self.fc1(embeding))
+        # x = F.relu(self.fc2(x))
+        return self.fc1(embeding)
