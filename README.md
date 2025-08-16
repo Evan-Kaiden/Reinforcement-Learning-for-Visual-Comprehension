@@ -1,6 +1,5 @@
-# RVC
-Reinforcement Learning for Visual Comprehension
-
+# RVC: Reinforcement Learning for Visual Comprehension
+*A policy-gradient approach to learning visual attention strategies with memory-based context encoding.*
 # Driving Question
 If we give a Reinforcement Learning agent 2 tools: **vision** and **memory** will it be able to scan an image and learn "where to look" 
 
@@ -23,14 +22,19 @@ To avoid a sparse reward signal I used two rewards:
 1. Final Classification Reward
     $$2 \text{ if } \hat{y} = y \text{ else } -2$$
 2. Per Step Confidence Rewards
-    $$ \Delta\text{CE} = CE_i - CE_{i-1}, \quad   -0.1 <\Delta\text{CE} < 0.1$$ 
-    This will reward the model for taking "informational" glimpses as it rewards an increased cross entropy loss from the previous step encouraging the model to take steps that gain the most information
-
+$$
+\Delta \text{CE} \coloneqq CE_i - CE_{i-1}
+$$
+with the clamp:
+$$
+-0.1 < \Delta \text{CE} < 0.1
+$$
+This encourages the model to take steps that maximize information gain.
 ### 3. Updating
 This policy is trained using REINFORCE with a baseline to improve learning stability
 
 # Classification:
-1. Using the policy generate an action based on the prevous state; $(x,y)$ center position to extract a patch from.
+1. Using the policy generate an action based on the previous state; $(x,y)$ center position to extract a patch from.
 
 2. Pass this patch into an encoder (a small CNN or MLP)
 
@@ -49,17 +53,29 @@ The following commands show how to replicate a few experiments
 ```bash
 python main.py --pretrain True --patch_size 8 --steps 6 --img_size 64 --clutter_count 4 --stride 4
 ```
+This will run on cluttered MNIST with the above parameters. The vision sequence can be seen below. The agent can be seen first locating the number in the image. then with the remaining steps looking at the number.
 
-![Demo](/gifs_experiment1/attention1.gif) ![Demo](/gifs_experiment1/attention2.gif) ![Demo](/gifs_experiment1/attention3.gif)
+| ![](gifs/gifs_experiment1/attention1.gif) | ![](gifs/gifs_experiment1/attention2.gif) | ![](gifs/gifs_experiment1/attention3.gif) |
+|--------------------------------------|--------------------------------------|--------------------------------------|
 
-![Demo](/gifs_experiment1/attention4.gif) ![Demo](/gifs_experiment1/attention5.gif) ![Demo](/gifs_experiment1/attention6.gif)
+
+| ![](gifs/gifs_experiment1/attention4.gif) | ![](gifs/gifs_experiment1/attention5.gif) | ![](gifs/gifs_experiment1/attention6.gif) |
+|--------------------------------------|--------------------------------------|--------------------------------------|
+
+![Demo](gifs/gifs_experiment1/attention4.gif)
 
 ```bash
-python main.py --pretrain True --patch_size 4 --steps 6 --img_size 28 --clutter_count 0 --stride 4
+python main.py --pretrain True --patch_size 3 --steps 8 --img_size 28 --clutter_count 0 --stride 3
 ```
-![Demo](/gifs_experiment2/attention1.gif) ![Demo](/gifs_experiment2/attention2.gif) ![Demo](/gifs_experiment2/attention3.gif)
+This will run on normal MNIST as the image size specified is the default size for MNIST. The agent can be seen taking glimpses at and around the number. 
 
-![Demo](/gifs_experiment2/attention4.gif) ![Demo](/gifs_experiment2/attention5.gif) ![Demo](/gifs_experiment2/attention6.gif)
+| ![](gifs/gifs_experiment2/attention1.gif) | ![](gifs/gifs_experiment2/attention2.gif) | ![](gifs/gifs_experiment2/attention3.gif) |
+|--------------------------------------|--------------------------------------|--------------------------------------|
+
+
+| ![](gifs/gifs_experiment2/attention4.gif) | ![](gifs/gifs_experiment2/attention5.gif) | ![](gifs/gifs_experiment2/attention6.gif) |
+|--------------------------------------|--------------------------------------|--------------------------------------|
 
 # References
 * https://github.com/bentrevett/recurrent-attention-model
+* https://arxiv.org/pdf/1406.6247
