@@ -2,9 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchvision import models
-
-
 class PerceptionPolicy(nn.Module):
     def __init__(self, action_space, embd_dim):
         super().__init__()
@@ -39,8 +36,6 @@ class PerceptionEncoder(nn.Module):
             nn.BatchNorm2d(64), nn.ReLU(inplace=True),
             nn.Conv2d(64, 128, 3, padding=1, stride=2),
             nn.BatchNorm2d(128), nn.ReLU(inplace=True),
-            # nn.Conv2d(128, 256, 3, padding=1),
-            # nn.BatchNorm2d(256), nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d(1)
         )
         self.location_encoder = nn.Linear(2, 128)
@@ -127,9 +122,7 @@ class Classifier(nn.Module):
     def __init__(self, embd_dim, n_classes):
         super().__init__()
         self.fc1 = nn.Linear(embd_dim, n_classes)
-        # self.fc2 = nn.Linear(64, 128)
-        # self.final = nn.Linear(128, n_classes)
-    
+
     def forward(self, embeding):
         """
         Inputs:
@@ -137,6 +130,5 @@ class Classifier(nn.Module):
         Returns:
             output: [B, n_classes]
         """
-        # x = F.relu(self.fc1(embeding))
-        # x = F.relu(self.fc2(x))
+
         return self.fc1(embeding)

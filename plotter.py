@@ -1,24 +1,17 @@
 import os
 import torch.nn.functional as F
+
+from io import BytesIO
+import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-import imageio.v2 as imageio
-from io import BytesIO
-import torch
+
 from utils import map_scale
 
 def plot_centers(img, epoch, id, centers):
     """Plots the sequence of centers the agent predicted for a single image"""
     plt.ioff() 
 
-    # ----- For CIFAR-10 Denormalization -----
-    # MEAN = torch.tensor([0.4914, 0.4822, 0.4465])
-    # STD  = torch.tensor([0.2470, 0.2435, 0.2616])
-
-    # img = torch.clamp(img * MEAN[:, None, None] + STD[:, None, None], 0.0, 1.0)
-    
-
-    # ----------------------------------------
     out_dir = os.path.join('plots', f'epoch{epoch}')
     if not os.path.exists(out_dir):
         os.mkdir(out_dir)
@@ -116,6 +109,7 @@ def make_gif(img, centers, patch_size, filename="attention.gif", fps=2):
     if max(x) <= 1 and min(x) >= -1:
         x, y = [map_scale(x_val.item(), H) for x_val in x], [map_scale(y_val.item(), H) for y_val in y]
 
+    # ----- Create and add frames -----
     frames = []
     for i in range(len(x)):
         fig, ax = plt.subplots()
@@ -137,6 +131,7 @@ def make_gif(img, centers, patch_size, filename="attention.gif", fps=2):
         frames.append(imageio.imread(buf))
         buf.close()
 
+    # ----- create and save gif -----
     gif_path = os.path.join(out_dir, filename)
     imageio.mimsave(gif_path, frames, fps=fps, loop=0)
     print(f"GIF saved to {gif_path}")
