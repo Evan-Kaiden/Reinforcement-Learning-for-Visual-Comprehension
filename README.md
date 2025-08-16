@@ -1,4 +1,4 @@
-# RVC: Reinforcement Learning for Visual Comprehension
+# Reinforcement Learning for Visual Comprehension
 *A policy-gradient approach to learning visual attention strategies with memory-based context encoding.*
 # Driving Question
 If we give a Reinforcement Learning agent 2 tools: **vision** and **memory** will it be able to scan an image and learn "where to look" 
