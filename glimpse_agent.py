@@ -22,30 +22,30 @@ class GlimpseAgent(nn.Module):
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Action Space Sampling Parameters ---------------------------------------
-        self.S            = image_size   # input image resolution (assume square)
-        self.p            = patch_size   # size of extracted glimpse
+        self.S = image_size   # input image resolution (assume square)
+        self.p = patch_size   # size of extracted glimpse
         self.action_space = action_space
-        self.stride       = stride
-        self.first        = patch_size // 2          
-        self.last         = image_size - patch_size//2 
+        self.stride = stride
+        self.first = patch_size // 2          
+        self.last = image_size - patch_size//2 
 
         # Models -----------------------------------------------------------------
-        self.encoder    = encoder.to(self.device)
-        self.gate       = gate.to(self.device)
+        self.encoder = encoder.to(self.device)
+        self.gate = gate.to(self.device)
         self.classifier = classifier.to(self.device)
-        self.policy     = policy.to(self.device)
-        self.memory     = context_memory.to(self.device)
-        self.rnn        = seq_summarizer.to(self.device)
+        self.policy = policy.to(self.device)
+        self.memory = context_memory.to(self.device)
+        self.rnn = seq_summarizer.to(self.device)
         #  value head
         self.value_head = nn.Sequential(nn.Linear(embd_dim, 64),
                                         nn.ReLU(), 
                                         nn.Linear(64, 1)).to(self.device)
 
         #  Hyper‑params ----------------------------------------------------------
-        self.attn_tau       = 0.5                  # temperature for soft attention
-        self.gamma          = gamma
+        self.attn_tau = 0.5                  # temperature for soft attention
+        self.gamma = gamma
         self.entropy_weight = init_entropy_weight  # encourage exploration
-        self.init_entropy   = init_entropy_weight
+        self.init_entropy = init_entropy_weight
 
         # Optimisers --------------------------------------------------------------
         self.classification_criterion = nn.CrossEntropyLoss()
@@ -60,7 +60,7 @@ class GlimpseAgent(nn.Module):
                 lr=1e-4
                )  
         
-        self.reinforce_optimizer  = torch.optim.Adam(chain(self.policy.parameters(), self.memory.parameters()), lr=3e-4)
+        self.reinforce_optimizer = torch.optim.Adam(chain(self.policy.parameters(), self.memory.parameters()), lr=3e-4)
         self.value_head_optimizer = torch.optim.Adam(self.value_head.parameters(), lr=1e-3)
 
         # Track For Model Checkpoints -----------------------------------------------
@@ -69,8 +69,8 @@ class GlimpseAgent(nn.Module):
     def _retina_step(self, x, center):
         """Extract pxp patch around center (in [-1,1] coords)"""
         _, _, S, _ = x.shape
-        grid       = make_glimpse_grid(center, min(int(round(self.p)), S), S)
-        patch      = F.grid_sample(x, grid, align_corners=True)
+        grid = make_glimpse_grid(center, min(int(round(self.p)), S), S)
+        patch = F.grid_sample(x, grid, align_corners=True)
         if patch.size(-1) != self.p:
             patch = F.interpolate(patch, size=(self.p, self.p), mode="bilinear", align_corners=True)
         return patch
@@ -110,14 +110,14 @@ class GlimpseAgent(nn.Module):
         """forward pass on a sequence of features"""
         
         # Pool sequence with LSTM + attention gate --------------------------------
-        seq_input  = torch.cat(seq_feats, dim=1)
+        seq_input = torch.cat(seq_feats, dim=1)
         rnn_out, _ = self.rnn(seq_input)                            # [B,T,D]
 
-        scores     = self.gate(rnn_out)                             # [B,T,1]
-        alpha      = torch.softmax(scores / self.attn_tau, dim=1)
-        pooled     = (rnn_out * alpha).sum(dim=1)                   # [B,D]
+        scores = self.gate(rnn_out)                             # [B,T,1]
+        alpha = torch.softmax(scores / self.attn_tau, dim=1)
+        pooled = (rnn_out * alpha).sum(dim=1)                   # [B,D]
  
-        logits     = self.classifier(pooled)                        # [B,n_classes]
+        logits = self.classifier(pooled)                        # [B,n_classes]
         return logits
 
     # ---------------------------------------------------------------------
@@ -136,7 +136,7 @@ class GlimpseAgent(nn.Module):
         values :    [T,B]   value baseline per step
         """
         B, _, _, _ = x.shape
-        device     = x.device
+        device = x.device
 
         # episode state
         n = self.action_space
@@ -144,8 +144,8 @@ class GlimpseAgent(nn.Module):
 
         # start at the grid center 
         center_idx = (n // 2) * n + (n // 2)
-        prev_idx   = x.new_full((B,), center_idx, dtype=torch.long, device=device)
-        prev_loc   = self._idx_to_coord(prev_idx)
+        prev_idx = x.new_full((B,), center_idx, dtype=torch.long, device=device)
+        prev_loc = self._idx_to_coord(prev_idx)
 
         # memory state
         h_t = x.new_zeros(B, self.memory.hidden_size)
@@ -153,8 +153,8 @@ class GlimpseAgent(nn.Module):
         prev_ctx = h_t
 
         # visited mask 
-        visited  = torch.zeros(B, A, device=device, dtype=torch.bool)
-        upd0     = F.one_hot(prev_idx, num_classes=A).to(device=device, dtype=torch.bool)
+        visited = torch.zeros(B, A, device=device, dtype=torch.bool)
+        upd0 = F.one_hot(prev_idx, num_classes=A).to(device=device, dtype=torch.bool)
         visited |= upd0
 
         # logs
@@ -164,7 +164,7 @@ class GlimpseAgent(nn.Module):
 
         for t in range(max_steps):
             # read current patch, update memory
-            patch  = self._retina_step(x, prev_loc)
+            patch = self._retina_step(x, prev_loc)
             feat_t = self.encoder(patch, prev_loc).view(B, -1)
             h_t, c_t = self.memory((feat_t, (h_t, c_t)))
             prev_ctx = h_t
@@ -183,8 +183,7 @@ class GlimpseAgent(nn.Module):
                         # first step: no cost
                         step_reward = torch.zeros(B, dtype=torch.float32, device=device)
                     else:
-                        # delta CE = ce(prev) - ce(curr); clip for stability
-                        delta       = self._confidence_reward(logits_t, prev_logits, targets)
+                        delta = self._confidence_reward(logits_t, prev_logits, targets)
                         step_reward = delta.clamp(-0.1, 0.1)
                     rewards.append(step_reward)
                     prev_logits = logits_t.detach()
@@ -193,10 +192,10 @@ class GlimpseAgent(nn.Module):
             action_logits = self.policy(prev_ctx, prev_loc)
 
             # per-step masked logits
-            step_mask     = visited.detach().clone()
+            step_mask = visited.detach().clone()
             masked_logits = action_logits.masked_fill(step_mask, -1e9)
-            act_dist      = Categorical(logits=masked_logits)
-            idx_next      = act_dist.sample()
+            act_dist = Categorical(logits=masked_logits)
+            idx_next = act_dist.sample()
 
             # log-prob and entropy
             logp_t = act_dist.log_prob(idx_next)
@@ -205,7 +204,7 @@ class GlimpseAgent(nn.Module):
             entropies.append(entr_t)
 
             # update visited with the chosen next index
-            upd      = F.one_hot(idx_next, num_classes=A).to(device=device, dtype=torch.bool)
+            upd = F.one_hot(idx_next, num_classes=A).to(device=device, dtype=torch.bool)
             visited |= upd
 
             # advance to next step
@@ -217,7 +216,7 @@ class GlimpseAgent(nn.Module):
 
         # ---------- Update Final Reward ----------
         if targets is not None:
-            preds   = logits.argmax(dim=1)
+            preds = logits.argmax(dim=1)
             final_r = torch.where(
                 preds == targets,
                 torch.tensor( 2.0, device=device),
@@ -227,10 +226,10 @@ class GlimpseAgent(nn.Module):
 
 
         # ---------- stack & advantages ----------
-        values     = torch.stack(values)                    # [T,B]
-        logps      = torch.stack(logps)                     # [T,B]
-        entropies  = torch.stack(entropies)                 # [T,B]
-        returns    = self._discounted(rewards, self.gamma)  # [T,B]
+        values = torch.stack(values)                    # [T,B]
+        logps = torch.stack(logps)                     # [T,B]
+        entropies = torch.stack(entropies)                 # [T,B]
+        returns = self._discounted(rewards, self.gamma)  # [T,B]
 
         advantages = (returns - values).detach()
         advantages = (advantages - advantages.mean()) / (advantages.std().clamp_min(1e-8))
@@ -256,15 +255,15 @@ class GlimpseAgent(nn.Module):
 
         # ---------- Initialize Episoide Parameters ----------
         center_idx = (n // 2) * n + (n // 2)    # start at grid center
-        prev_idx   = x.new_full((B,), center_idx, dtype=torch.long, device=device)
-        prev_loc   = self._idx_to_coord(prev_idx)
+        prev_idx = x.new_full((B,), center_idx, dtype=torch.long, device=device)
+        prev_loc = self._idx_to_coord(prev_idx)
 
-        h_t      = x.new_zeros(B, self.memory.hidden_size)
-        c_t      = x.new_zeros(B, self.memory.hidden_size)
+        h_t = x.new_zeros(B, self.memory.hidden_size)
+        c_t = x.new_zeros(B, self.memory.hidden_size)
         prev_ctx = h_t
 
-        visited  = torch.zeros(B, A, device=device, dtype=torch.bool)
-        upd0     = F.one_hot(prev_idx, num_classes=A).to(device=device, dtype=torch.bool)
+        visited = torch.zeros(B, A, device=device, dtype=torch.bool)
+        upd0 = F.one_hot(prev_idx, num_classes=A).to(device=device, dtype=torch.bool)
         visited |= upd0
 
         # logs
@@ -272,7 +271,7 @@ class GlimpseAgent(nn.Module):
 
         for t in range(steps):
             # sense
-            patch  = self._retina_step(x, prev_loc)
+            patch = self._retina_step(x, prev_loc)
             feat_t = self.encoder(patch, prev_loc).view(B, -1)
         
             if B == 1:
@@ -287,12 +286,12 @@ class GlimpseAgent(nn.Module):
             action_logits = self.policy(prev_ctx, prev_loc)
 
             masked_logits = action_logits.masked_fill(visited, -1e9)
-            all_done      = visited.all(dim=1)
+            all_done = visited.all(dim=1)
             masked_logits = torch.where(all_done.unsqueeze(1),
                                         torch.zeros_like(masked_logits),
                                         masked_logits)
 
-            idx_next      = masked_logits.argmax(dim=1)
+            idx_next = masked_logits.argmax(dim=1)
 
             if B == 1: dists.append(masked_logits)
 
@@ -331,17 +330,17 @@ class GlimpseAgent(nn.Module):
                 total_returns += returns[0].mean().item()
 
                 # ---------- Supervised loss ----------
-                cls_loss                   = self.classification_criterion(logits, targets)
+                cls_loss = self.classification_criterion(logits, targets)
                 total_classification_loss += cls_loss.item()
 
                 # ---------- Policy loss ----------
-                policy_loss        = -(logps * advantages.detach()).mean()
-                entropy_loss       = -(self.entropy_weight * entropies.mean())
-                rl_loss            = policy_loss + entropy_loss
+                policy_loss = -(logps * advantages.detach()).mean()
+                entropy_loss = -(self.entropy_weight * entropies.mean())
+                rl_loss = policy_loss + entropy_loss
                 total_policy_loss += rl_loss.item()
 
                 # ---------- Value loss ----------
-                value_loss        = 0.5 * (values - returns.detach()).pow(2).mean()
+                value_loss = 0.5 * (values - returns.detach()).pow(2).mean()
                 total_value_loss += value_loss.item()
 
                 # ---------- Back‑prop RL branch ----------
@@ -387,13 +386,13 @@ class GlimpseAgent(nn.Module):
         
         # ---------- Eval Taking Greedy Actions ----------
         for imgs, targets in testloader:
-            imgs, targets   = imgs.to(self.device), targets.to(self.device)
+            imgs, targets = imgs.to(self.device), targets.to(self.device)
             logits, _, _, _ = self.greedy_forward(imgs, steps=max_steps)
-            loss_sum       += self.classification_criterion(logits, targets).item() * targets.size(0)
-            correct        += (logits.argmax(dim=1) == targets).sum().item()
-            total          += targets.size(0)
+            loss_sum += self.classification_criterion(logits, targets).item() * targets.size(0)
+            correct += (logits.argmax(dim=1) == targets).sum().item()
+            total += targets.size(0)
 
-        acc      = correct / max(total, 1)
+        acc = correct / max(total, 1)
         avg_loss = loss_sum / max(total, 1)
         
         print(f'Test Accuracy : {acc} | Test Loss : {avg_loss}\n')

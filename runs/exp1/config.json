@@ -1,0 +1,16 @@
+{
+  "cls_epochs": 5,
+  "agent_epochs": 100,
+  "patch_size": 8,
+  "embd_dim": 128,
+  "n_classes": 10,
+  "img_size": 28,
+  "img_channels": 1,
+  "step_cost": 0.0,
+  "gamma": 0.98,
+  "entropy_weight": 0.03,
+  "out_dir": "runs/exp1",
+  "cls_lr": 0.001,
+  "stride": 4,
+  "steps": 6
+}
