@@ -14,7 +14,7 @@ def make_glimpse_grid(center, p, S, align_corners=True):
     B = center.size(0)
 
     # Create Grid
-    lin    = torch.linspace(-1, 1, p, device=center.device, dtype=center.dtype)
+    lin = torch.linspace(-1, 1, p, device=center.device, dtype=center.dtype)
     gy, gx = torch.meshgrid(lin, lin, indexing='ij')
     base = torch.stack([gx, gy], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
 

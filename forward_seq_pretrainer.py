@@ -13,15 +13,15 @@ class preTrainer(nn.Module):
 
         # Action Space Sampling Parameters -----------------------
         self.in_channels = in_channels
-        self.S           = img_size
-        self.p           = patch_size
-        self.stride      = stride
-        self.attn_tau    = 0.5
+        self.S = img_size
+        self.p = patch_size
+        self.stride = stride
+        self.attn_tau = 0.5
         
         # Models -------------------------------------------------
-        self.encoder        = encoder.to(device)
-        self.classifier     = classifier.to(device)
-        self.gate           = gate.to(device)
+        self.encoder = encoder.to(device)
+        self.classifier = classifier.to(device)
+        self.gate = gate.to(device)
         self.seq_summarizer = seq_summarizer.to(device)
 
 
@@ -54,9 +54,9 @@ class preTrainer(nn.Module):
 
     def get_patches(self, x):
         """Return all patches of an image given a patch size and a stride"""
-        B       = x.size(0)
+        B = x.size(0)
         patches = F.unfold(x, kernel_size=self.p, stride=self.stride).permute(0, 2, 1).reshape(-1, self.in_channels, self.p, self.p)
-        T       = patches.size(0) // B
+        T = patches.size(0) // B
 
         return patches.contiguous(), T
     
@@ -65,8 +65,8 @@ class preTrainer(nn.Module):
 
         # Get Patches and Centers -----------------------------------------
         patches, T = self.get_patches(x)
-        centers    = self.centers.reshape(-1, 2)
-        centers    = centers.repeat(B, 1)
+        centers = self.centers.reshape(-1, 2)
+        centers = centers.repeat(B, 1)
         
         # Encoder Output --------------------------------------------------
         seq_input = self.encoder(patches, centers)              #  [B*T, D]

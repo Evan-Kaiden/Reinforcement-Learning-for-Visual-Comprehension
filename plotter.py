@@ -82,7 +82,7 @@ def plot_attentions(distributions, epoch, id, action_space, cmap='inferno'):
         ax.axis('off')
 
         # ----- Create Plot -----
-        im   = ax.imshow(dist, cmap=cmap, interpolation='nearest')
+        im = ax.imshow(dist, cmap=cmap, interpolation='nearest')
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_label('Probability', rotation=270, labelpad=10)
         
